@@ -58,8 +58,7 @@ if st.button("Get Report"):
     # Fetch Calls
     calls = client.calls.list(
         start_time_after=start_utc,
-        start_time_before=end_utc,
-        limit=500
+        start_time_before=end_utc        
     )
     for c in calls:
         if c.from_:
@@ -68,8 +67,7 @@ if st.button("Get Report"):
     # Fetch SMS
     messages = client.messages.list(
         date_sent_after=start_utc,
-        date_sent_before=end_utc,
-        limit=500
+        date_sent_before=end_utc        
     )
     for m in messages:
         if m.from_:
@@ -84,3 +82,4 @@ if st.button("Get Report"):
     else:
         for number, stats in report_data.items():
             st.write(f"{number} → {stats['calls']} Calls, {stats['sms']} SMS")
+
