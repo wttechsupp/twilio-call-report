@@ -6,20 +6,14 @@ from collections import defaultdict
 # -----------------------
 # CONFIG
 # -----------------------
+# Best practice: Store these in Streamlit Secrets (not hardcoded)
 USERNAME = st.secrets.get("APP_USER")
 PASSWORD = st.secrets.get("APP_PASS")
 TWILIO_SID = st.secrets["TWILIO_SID"]
 TWILIO_AUTH_TOKEN = st.secrets["TWILIO_AUTH_TOKEN"]
 
-# Twilio client
+# Setup Twilio client
 client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
-
-# Name mapping (add more as needed)
-NAME_MAP = {
-    "+13613332093": "Warren Kadd",
-    "+12109341811": "Swapnil B",
-    "+14693789446": "Roshan Y",
-}
 
 # -----------------------
 # TIME RANGE (IST 5PM–5AM)
@@ -55,7 +49,7 @@ if not st.session_state["logged_in"]:
             st.success("✅ Login successful")
         else:
             st.error("❌ Invalid credentials")
-    st.stop()   # stop app until login
+    st.stop()  # stop app until login
 
 # --- FETCH REPORT ---
 if st.button("Get Report"):
@@ -64,22 +58,22 @@ if st.button("Get Report"):
     # Fetch Calls
     calls = client.calls.list(
         start_time_after=start_utc,
-        start_time_before=end_utc
+        start_time_before=end_utc,
+        limit=500
     )
     for c in calls:
-        from_number = getattr(c, "from_", None)
-        if from_number:
-            report_data[from_number]["calls"] += 1
+        if c.from_:
+            report_data[c.from_]["calls"] += 1
 
     # Fetch SMS
     messages = client.messages.list(
         date_sent_after=start_utc,
-        date_sent_before=end_utc
+        date_sent_before=end_utc,
+        limit=500
     )
     for m in messages:
-        from_number = getattr(m, "from_", None)
-        if from_number:
-            report_data[from_number]["sms"] += 1
+        if m.from_:
+            report_data[m.from_]["sms"] += 1
 
     # Show Report
     today = now_ist.strftime("%d-%b-%Y")
@@ -89,5 +83,4 @@ if st.button("Get Report"):
         st.info("No calls or SMS found in this time window.")
     else:
         for number, stats in report_data.items():
-            name = NAME_MAP.get(number, "Unknown")
-            st.write(f"{name:12} {number} → {stats['calls']} Calls, {stats['sms']} SMS")
+            st.write(f"{number} → {stats['calls']} Calls, {stats['sms']} SMS")
