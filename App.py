@@ -2,7 +2,7 @@ import re
 import streamlit as st
 from twilio.rest import Client
 from datetime import datetime, timedelta, timezone
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 # -----------------------
 # CONFIG (from Streamlit secrets)
@@ -19,46 +19,44 @@ except Exception as e:
 client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
 
 # -----------------------
-# NAME MAP (edit/add your Twilio numbers here)
-# Put numbers in any format; they'll be normalized automatically.
+# NAME MAP (edit/add numbers here)
+# You can also map Twilio Client IDs like "client:agent1"
 # -----------------------
 NAME_MAP = {
     "+13613332093": "Warren Kadd",
     "+12109341811": "Swapnil B",
     "+14693789446": "Roshan Y",
+    # "client:agent1": "Agent 1",
 }
 
 # -----------------------
 # Helpers
 # -----------------------
 def normalize_number(val):
-    """Extract a phone number in E.164-ish form from val.
-    Returns None if nothing recognizable is found."""
+    """Extract something that looks like a phone number in E.164-ish form.
+    Returns None if no digit sequence found (e.g., 'client:alice')."""
     if not val:
         return None
     s = str(val)
-    # look for + and digits or long digit sequence (5-15 digits)
     m = re.search(r'(\+?\d{5,15})', s)
     if m:
         num = m.group(1)
         return num if num.startswith("+") else "+" + num
-    # fallback: strip whitespace
-    s2 = re.sub(r'\s+', '', s)
-    return s2 if s2 else None
+    return None
 
-# Normalize NAME_MAP keys once
-NORMALIZED_NAME_MAP = {normalize_number(k): v for k, v in NAME_MAP.items() if normalize_number(k)}
+# Build a flexible lookup map:
+# - exact key (as provided)
+# - normalized E.164 key (if possible)
+NORMALIZED_NAME_MAP = {}
+for k, v in NAME_MAP.items():
+    NORMALIZED_NAME_MAP[str(k)] = v
+    nk = normalize_number(k)
+    if nk:
+        NORMALIZED_NAME_MAP[nk] = v
 
-# Decide which side of an interaction to use as "our number"
-def our_number_from_call(c):
-    """Return our Twilio number for a call record based on direction."""
-    direction = (getattr(c, "direction", "") or "").lower()
-    if direction.startswith("outbound"):
-        return getattr(c, "from_", None)
-    elif direction.startswith("inbound"):
-        return getattr(c, "to", None)
-    # fallback: prefer from_, else to
-    return getattr(c, "from_", None) or getattr(c, "to", None)
+def name_for(key):
+    """Resolve a display name for a key which may be E.164 or raw (e.g., 'client:xyz')."""
+    return NORMALIZED_NAME_MAP.get(key, "Unknown")
 
 def our_number_from_message(m):
     """Return our Twilio number for an SMS record based on direction/status."""
@@ -67,13 +65,10 @@ def our_number_from_message(m):
         return getattr(m, "from_", None)
     elif direction.startswith("inbound"):
         return getattr(m, "to", None)
-    # fallback: prefer from_, else to
     return getattr(m, "from_", None) or getattr(m, "to", None)
 
 # -----------------------
-# TIME RANGE (IST 5PM–5AM)
-# - Default window = yesterday 17:00 IST → today 05:00 IST.
-# - If now < 05:00 IST, end at now to avoid looking into the future.
+# TIME RANGE (IST 5PM–5AM) — dynamic end
 # -----------------------
 IST = timezone(timedelta(hours=5, minutes=30))
 now_ist = datetime.now(IST)
@@ -84,7 +79,7 @@ end_ist = start_ist + timedelta(hours=12)
 if now_ist < end_ist:
     end_ist = now_ist
 
-# Convert to UTC for Twilio filters
+# Convert to UTC for Twilio
 start_utc = start_ist.astimezone(timezone.utc)
 end_utc = end_ist.astimezone(timezone.utc)
 
@@ -117,13 +112,9 @@ show_raw = st.checkbox("Show raw samples (calls/messages) — use for debugging"
 if st.button("Get Report"):
     report_data = defaultdict(lambda: {"calls": 0, "sms": 0, "duration": 0})
 
-    # Fetch Twilio calls/messages into lists (so we can inspect len and samples)
+    # Fetch Twilio calls/messages
     try:
-        # Use a larger limit to avoid truncation on busy days
         calls = list(client.calls.list(start_time_after=start_utc, start_time_before=end_utc, limit=1000))
-        # Alternative if your library version prefers _gte/_lt:
-        # calls = list(client.calls.list(start_time_gte=start_utc, start_time_lt=end_utc, limit=1000))
-
         messages = list(client.messages.list(date_sent_after=start_utc, date_sent_before=end_utc, limit=5000))
     except Exception as e:
         st.error(f"Error fetching from Twilio: {e}")
@@ -131,7 +122,7 @@ if st.button("Get Report"):
 
     st.write(f"Calls fetched: {len(calls)} — Messages fetched: {len(messages)}")
 
-    # Optionally show a few raw samples to verify shapes/fields
+    # Optional raw samples
     if show_raw:
         st.subheader("Sample calls (first 10)")
         for c in calls[:10]:
@@ -156,75 +147,62 @@ if st.button("Get Report"):
             })
 
     # -----------------------
-    # Process calls — count only completed calls, attribute to our Twilio number
+    # Calls: Status == Completed, group by From, collect Duration
     # -----------------------
-    # for c in calls:
-    #     status = (getattr(c, "status", "") or "").lower()
-    #     if status != "completed":
-    #         continue
-
-    #     raw_our_number = our_number_from_call(c)
-    #     num = normalize_number(raw_our_number)
-    #     if not num:
-    #         continue
-
-    #     report_data[num]["calls"] += 1
-
-    #     # accumulate duration (seconds)
-    #     try:
-    #         d = int(getattr(c, "duration", 0) or 0)
-    #     except Exception:
-    #         d = 0
-    #     report_data[num]["duration"] += d
+    status_counter = Counter()
     for c in calls:
-        if (getattr(c, "status", "") or "").lower() != "completed":
+        status_val = (getattr(c, "status", "") or "").lower()
+        status_counter[status_val] += 1
+        if status_val != "completed":
             continue
 
         raw_from = getattr(c, "from_", None)
-        num = normalize_number(raw_from)
-        if not num:
+        # Prefer normalized E.164; if not a phone number (e.g., 'client:xyz'), fall back to raw
+        num_key = normalize_number(raw_from) or (str(raw_from) if raw_from else None)
+        if not num_key:
             continue
 
-        report_data[num]["calls"] += 1
+        report_data[num_key]["calls"] += 1
         try:
             d = int(getattr(c, "duration", 0) or 0)
         except Exception:
             d = 0
-        report_data[num]["duration"] += d
+        report_data[num_key]["duration"] += d
+
+    # Quick status histogram to help diagnose filters
+    with st.expander("Call status breakdown (debug)"):
+        st.write(dict(status_counter))
 
     # -----------------------
-    # Process messages — attribute to our Twilio number (outbound -> from_, inbound -> to)
+    # SMS: keep existing logic (attribute to our Twilio number)
     # -----------------------
-        for m in messages:
-            raw_our_number = our_number_from_message(m)
-            num = normalize_number(raw_our_number)
-            if not num:
-                continue
+    for m in messages:
+        raw_our_number = our_number_from_message(m)
+        num = normalize_number(raw_our_number) or (str(raw_our_number) if raw_our_number else None)
+        if not num:
+            continue
         report_data[num]["sms"] += 1
 
     # -----------------------
-    # Build rows for display, normalize name mapping
+    # Build rows
     # -----------------------
     rows = []
-    for num, stats in report_data.items():
-        name = NORMALIZED_NAME_MAP.get(num, "Unknown")
+    for key, stats in report_data.items():
+        name = name_for(key)
         total = stats["calls"] + stats["sms"]
         rows.append({
             "Name": name,
-            "Number": num,
-            "Calls": stats["calls"],
+            "Number / ID": key,
+            "Calls (Completed)": stats["calls"],
             "Call Minutes": round(stats.get("duration", 0) / 60, 1),
             "SMS": stats["sms"],
             "Total": total,
         })
 
     if not rows:
-        st.info("No calls or SMS found in this time window.")
+        st.info("No calls or SMS found in this time window. Enable 'Show raw samples' or check the status breakdown above to validate filters.")
     else:
-        # Sort by Total (desc)
         rows = sorted(rows, key=lambda r: r["Total"], reverse=True)
         st.subheader(f"📊 Daily Twilio Report ({end_ist.strftime('%d-%b-%Y')})")
         st.dataframe(rows, hide_index=True)
-        st.caption("Note: Grouping is by your Twilio number (‘Number’ column). Edit NAME_MAP to label each line.")
-
-
+        st.caption("Calls grouped by **From** (caller). Non-phone IDs (e.g., client:something) are preserved.")
