@@ -2,7 +2,7 @@ import re
 import streamlit as st
 from twilio.rest import Client
 from datetime import datetime, timedelta, timezone
-from collections import defaultdict, Counter
+from collections import defaultdict
 
 # -----------------------
 # CONFIG (from Streamlit secrets)
@@ -19,8 +19,9 @@ except Exception as e:
 client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
 
 # -----------------------
-# NAME MAP (edit/add numbers here)
-# You can also map Twilio Client IDs like "client:agent1"
+# NAME MAP
+#   - Put your Twilio line numbers (for SMS) and/or caller IDs here.
+#   - We’ll normalize E.164-looking numbers; we also keep exact raw keys (e.g., 'client:agent1').
 # -----------------------
 NAME_MAP = {
     "+13613332093": "Warren Kadd",
@@ -29,12 +30,8 @@ NAME_MAP = {
     # "client:agent1": "Agent 1",
 }
 
-# -----------------------
-# Helpers
-# -----------------------
 def normalize_number(val):
-    """Extract something that looks like a phone number in E.164-ish form.
-    Returns None if no digit sequence found (e.g., 'client:alice')."""
+    """Return E.164-ish phone number if found; else None."""
     if not val:
         return None
     s = str(val)
@@ -44,42 +41,32 @@ def normalize_number(val):
         return num if num.startswith("+") else "+" + num
     return None
 
-# Build a flexible lookup map:
-# - exact key (as provided)
-# - normalized E.164 key (if possible)
-NORMALIZED_NAME_MAP = {}
+# Build lookup that works with either raw IDs or normalized numbers
+NAME_LOOKUP = {}
 for k, v in NAME_MAP.items():
-    NORMALIZED_NAME_MAP[str(k)] = v
+    NAME_LOOKUP[str(k)] = v
     nk = normalize_number(k)
     if nk:
-        NORMALIZED_NAME_MAP[nk] = v
+        NAME_LOOKUP[nk] = v
 
 def name_for(key):
-    """Resolve a display name for a key which may be E.164 or raw (e.g., 'client:xyz')."""
-    return NORMALIZED_NAME_MAP.get(key, "Unknown")
-
-def our_number_from_message(m):
-    """Return our Twilio number for an SMS record based on direction/status."""
-    direction = (getattr(m, "direction", "") or "").lower()
-    if direction.startswith("outbound"):
-        return getattr(m, "from_", None)
-    elif direction.startswith("inbound"):
-        return getattr(m, "to", None)
-    return getattr(m, "from_", None) or getattr(m, "to", None)
+    return NAME_LOOKUP.get(key, "Unknown")
 
 # -----------------------
-# TIME RANGE (IST 5PM–5AM) — dynamic end
+# TIME RANGE (IST 5PM–5AM)
 # -----------------------
 IST = timezone(timedelta(hours=5, minutes=30))
 now_ist = datetime.now(IST)
 
+# yesterday 17:00 → today 05:00 by default
 start_ist = (now_ist.replace(hour=17, minute=0, second=0, microsecond=0) - timedelta(days=1))
 end_ist = start_ist + timedelta(hours=12)
 
+# if it's before 05:00 now, cap end at "now" so we don't query future
 if now_ist < end_ist:
     end_ist = now_ist
 
-# Convert to UTC for Twilio
+# Twilio wants UTC
 start_utc = start_ist.astimezone(timezone.utc)
 end_utc = end_ist.astimezone(timezone.utc)
 
@@ -87,8 +74,6 @@ end_utc = end_ist.astimezone(timezone.utc)
 # STREAMLIT UI
 # -----------------------
 st.title("📊 Twilio Daily Report")
-
-# login flow (with immediate rerun)
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
 
@@ -110,9 +95,10 @@ st.markdown(f"**Window (UTC):** {start_utc.isoformat()} → {end_utc.isoformat()
 show_raw = st.checkbox("Show raw samples (calls/messages) — use for debugging", value=False)
 
 if st.button("Get Report"):
-    report_data = defaultdict(lambda: {"calls": 0, "sms": 0, "duration": 0})
+    # Separate aggregates
+    sms_data = defaultdict(lambda: {"sms": 0})
+    call_data = defaultdict(lambda: {"calls": 0, "duration": 0})
 
-    # Fetch Twilio calls/messages
     try:
         calls = list(client.calls.list(start_time_after=start_utc, start_time_before=end_utc, limit=1000))
         messages = list(client.messages.list(date_sent_after=start_utc, date_sent_before=end_utc, limit=5000))
@@ -122,9 +108,19 @@ if st.button("Get Report"):
 
     st.write(f"Calls fetched: {len(calls)} — Messages fetched: {len(messages)}")
 
-    # Optional raw samples
+    # ========== DEBUG SAMPLES ==========
     if show_raw:
-        st.subheader("Sample calls (first 10)")
+        st.subheader("Sample SMS (first 10)")
+        for m in messages[:10]:
+            st.json({
+                "sid": getattr(m, "sid", None),
+                "from": getattr(m, "from_", None),
+                "to": getattr(m, "to", None),
+                "direction": getattr(m, "direction", None),
+                "status": getattr(m, "status", None),
+                "date_sent": getattr(m, "date_sent", None),
+            })
+        st.subheader("Sample Calls (first 10)")
         for c in calls[:10]:
             st.json({
                 "sid": getattr(c, "sid", None),
@@ -135,74 +131,76 @@ if st.button("Get Report"):
                 "start_time": getattr(c, "start_time", None),
                 "duration": getattr(c, "duration", None),
             })
-        st.subheader("Sample messages (first 10)")
-        for m in messages[:10]:
-            st.json({
-                "sid": getattr(m, "sid", None),
-                "from": getattr(m, "from_", None),
-                "to": getattr(m, "to", None),
-                "direction": getattr(m, "direction", None),
-                "status": getattr(m, "status", None),
-                "date_sent": getattr(m, "date_sent", None),
-            })
 
-    # -----------------------
-    # Calls: Status == Completed, group by From, collect Duration
-    # -----------------------
-    status_counter = Counter()
+    # ========== SMS SECTION (TOP) ==========
+    st.header("✉️ SMS (grouped by our Twilio number)")
+    # keep your original SMS grouping: attribute to OUR number (outbound->from_, inbound->to)
+    def our_number_from_message(m):
+        d = (getattr(m, "direction", "") or "").lower()
+        if d.startswith("outbound"):
+            return getattr(m, "from_", None)
+        elif d.startswith("inbound"):
+            return getattr(m, "to", None)
+        return getattr(m, "from_", None) or getattr(m, "to", None)
+
+    for m in messages:
+        raw_our = our_number_from_message(m)
+        key = normalize_number(raw_our) or (str(raw_our) if raw_our else None)
+        if not key:
+            continue
+        sms_data[key]["sms"] += 1
+
+    sms_rows = []
+    for key, stats in sms_data.items():
+        sms_rows.append({
+            "Name": name_for(key),
+            "Our Number": key,
+            "SMS": stats["sms"],
+        })
+
+    if sms_rows:
+        sms_rows = sorted(sms_rows, key=lambda r: r["SMS"], reverse=True)
+        st.dataframe(sms_rows, hide_index=True, use_container_width=True)
+    else:
+        st.info("No SMS found in this time window.")
+
+    st.markdown("---")
+
+    # ========== CALLS SECTION (BOTTOM) ==========
+    st.header("📞 Calls (Status = Completed, grouped by **From**)")
+    # This is the block you said worked—only change is to force using FROM always (no 'to')
+    completed = 0
     for c in calls:
-        status_val = (getattr(c, "status", "") or "").lower()
-        status_counter[status_val] += 1
-        if status_val != "completed":
+        status = (getattr(c, "status", "") or "").lower()
+        if status != "completed":
+            continue
+        completed += 1
+
+        raw_from = getattr(c, "from_", None)  # always use FROM (caller), per your requirement
+        key = normalize_number(raw_from) or (str(raw_from) if raw_from else None)
+        if not key:
             continue
 
-        raw_from = getattr(c, "from_", None)
-        # Prefer normalized E.164; if not a phone number (e.g., 'client:xyz'), fall back to raw
-        num_key = normalize_number(raw_from) or (str(raw_from) if raw_from else None)
-        if not num_key:
-            continue
-
-        report_data[num_key]["calls"] += 1
+        call_data[key]["calls"] += 1
         try:
             d = int(getattr(c, "duration", 0) or 0)
         except Exception:
             d = 0
-        report_data[num_key]["duration"] += d
+        call_data[key]["duration"] += d
 
-    # Quick status histogram to help diagnose filters
-    with st.expander("Call status breakdown (debug)"):
-        st.write(dict(status_counter))
+    st.caption(f"Completed calls counted: {completed}")
 
-    # -----------------------
-    # SMS: keep existing logic (attribute to our Twilio number)
-    # -----------------------
-    for m in messages:
-        raw_our_number = our_number_from_message(m)
-        num = normalize_number(raw_our_number) or (str(raw_our_number) if raw_our_number else None)
-        if not num:
-            continue
-        report_data[num]["sms"] += 1
-
-    # -----------------------
-    # Build rows
-    # -----------------------
-    rows = []
-    for key, stats in report_data.items():
-        name = name_for(key)
-        total = stats["calls"] + stats["sms"]
-        rows.append({
-            "Name": name,
-            "Number / ID": key,
-            "Calls (Completed)": stats["calls"],
-            "Call Minutes": round(stats.get("duration", 0) / 60, 1),
-            "SMS": stats["sms"],
-            "Total": total,
+    call_rows = []
+    for key, stats in call_data.items():
+        call_rows.append({
+            "Name": name_for(key),
+            "From (Caller)": key,
+            "Calls": stats["calls"],
+            "Call Minutes": round(stats["duration"] / 60, 1),
         })
 
-    if not rows:
-        st.info("No calls or SMS found in this time window. Enable 'Show raw samples' or check the status breakdown above to validate filters.")
+    if call_rows:
+        call_rows = sorted(call_rows, key=lambda r: r["Calls"], reverse=True)
+        st.dataframe(call_rows, hide_index=True, use_container_width=True)
     else:
-        rows = sorted(rows, key=lambda r: r["Total"], reverse=True)
-        st.subheader(f"📊 Daily Twilio Report ({end_ist.strftime('%d-%b-%Y')})")
-        st.dataframe(rows, hide_index=True)
-        st.caption("Calls grouped by **From** (caller). Non-phone IDs (e.g., client:something) are preserved.")
+        st.info("No completed calls found (by From) in this time window.")
