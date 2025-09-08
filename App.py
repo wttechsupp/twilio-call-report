@@ -167,40 +167,54 @@ if st.button("Get Report"):
     st.markdown("---")
 
     # ========== CALLS SECTION (BOTTOM) ==========
-    st.header("📞 Calls (Status = Completed, grouped by **From**)")
-    # This is the block you said worked—only change is to force using FROM always (no 'to')
+# Process calls
     completed = 0
+    call_data = defaultdict(lambda: {"calls": 0, "duration": 0})
     for c in calls:
         status = (getattr(c, "status", "") or "").lower()
         if status != "completed":
             continue
         completed += 1
 
-        raw_from = getattr(c, "from_", None)  # always use FROM (caller), per your requirement
-        key = normalize_number(raw_from) or (str(raw_from) if raw_from else None)
+        # --- NEW LOGIC TO HANDLE CALL DIRECTION ---
+        direction = getattr(c, "direction", "")
+        number_to_process = None
+
+        # For outbound calls, the agent is the 'from' number
+        if 'outbound' in direction or 'originating' in direction:
+            number_to_process = getattr(c, "from_", None)
+        # For inbound calls, the agent/system is the 'to' number
+        elif 'inbound' in direction or 'terminating' in direction:
+            number_to_process = getattr(c, "to", None)
+        
+        key = normalize_number(number_to_process)
         if not key:
-            continue
+            continue  # Skip if we couldn't find a valid number
+        # --- END NEW LOGIC ---
 
         call_data[key]["calls"] += 1
         try:
             d = int(getattr(c, "duration", 0) or 0)
-        except Exception:
+        except (ValueError, TypeError):
             d = 0
         call_data[key]["duration"] += d
 
     st.caption(f"Completed calls counted: {completed}")
 
+    # Build rows for display
     call_rows = []
     for key, stats in call_data.items():
         call_rows.append({
-            "Name": name_for(key),
-            "From (Caller)": key,
+            "Agent Number": key, # Renamed column for clarity
+            "Name": NAME_MAP.get(key, "Unknown"), # Assuming you have a NAME_MAP
             "Calls": stats["calls"],
             "Call Minutes": round(stats["duration"] / 60, 1),
         })
 
     if call_rows:
         call_rows = sorted(call_rows, key=lambda r: r["Calls"], reverse=True)
+        st.subheader("📞 Call Report")
         st.dataframe(call_rows, hide_index=True, use_container_width=True)
     else:
-        st.info("No completed calls found (by From) in this time window.")
+        st.info("No completed calls with a recognizable agent number found.")
+
