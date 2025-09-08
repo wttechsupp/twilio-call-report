@@ -131,11 +131,22 @@ if st.button("Get Report"):
             })
 
     # Process calls
+    # Process calls
     for c in calls:
-        raw_from = getattr(c, "from_", None)
-        num = normalize_number(raw_from)
-        if num:
-            report_data[num]["calls"] += 1
+        if getattr(c, "status", "").lower() != "completed":
+            continue  # only completed calls
+
+    # prefer from_, else fall back to 'to'
+    raw_from = getattr(c, "from_", None) or getattr(c, "to", None)
+    num = normalize_number(raw_from)
+
+    if num:
+        report_data[num]["calls"] += 1
+        try:
+            d = int(c.duration) if c.duration else 0
+        except Exception:
+            d = 0
+        report_data[num]["duration"] = report_data[num].get("duration", 0) + d
 
     # Process messages
     for m in messages:
@@ -159,5 +170,6 @@ if st.button("Get Report"):
         # Display table
         st.subheader(f"📊 Daily Twilio Report ({end_ist.strftime('%d-%b-%Y')})")
         st.table(rows)
+
 
 
