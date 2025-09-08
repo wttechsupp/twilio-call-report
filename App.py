@@ -1,86 +1,86 @@
-import pandas as pd
 import streamlit as st
 from twilio.rest import Client
-import io
+from datetime import datetime, timedelta, timezone
+from collections import defaultdict
 
-st.set_page_config(page_title="📞 Twilio Call Report", layout="wide")
+# -----------------------
+# CONFIG
+# -----------------------
+# Best practice: Store these in Streamlit Secrets (not hardcoded)
+USERNAME = st.secrets.get("APP_USER")
+PASSWORD = st.secrets.get("APP_PASS")
+TWILIO_SID = st.secrets["TWILIO_SID"]
+TWILIO_AUTH_TOKEN = st.secrets["TWILIO_AUTH_TOKEN"]
 
-st.title("📞 Twilio Call Report Generator")
+# Setup Twilio client
+client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
 
-# --- OPTION A: Upload CSV ---
-st.subheader("Upload Twilio Call Log CSV")
-uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
+# -----------------------
+# TIME RANGE (IST 5PM–5AM)
+# -----------------------
+IST = timezone(timedelta(hours=5, minutes=30))
+now_ist = datetime.now(IST)
 
-# --- OPTION B: Fetch from Twilio API ---
-st.subheader("Or Fetch Directly from Twilio API")
-sid = st.text_input("Twilio Account SID", type="password")
-token = st.text_input("Twilio Auth Token", type="password")
-fetch_button = st.button("Fetch from Twilio API")
+# Yesterday 5 PM IST
+start_ist = (now_ist.replace(hour=17, minute=0, second=0, microsecond=0) 
+             - timedelta(days=1))
+# Today 5 AM IST
+end_ist = start_ist + timedelta(hours=12)
 
-df = None
+# Convert to UTC for Twilio
+start_utc = start_ist.astimezone(timezone.utc)
+end_utc = end_ist.astimezone(timezone.utc)
 
-# Load CSV
-if uploaded_file is not None:
-    df = pd.read_csv(uploaded_file)
+# -----------------------
+# STREAMLIT APP
+# -----------------------
+st.title("📊 Twilio Daily Report")
 
-# Fetch from API
-elif fetch_button and sid and token:
-    client = Client(sid, token)
-    calls = client.calls.list(limit=500)  # fetch last 500 calls
-    data = []
-    for call in calls:
-        data.append({
-            "From": call.from_,
-            "To": call.to,
-            "Status": call.status,
-            "Duration": int(call.duration or 0),
-            "Price": float(call.price or 0)
-        })
-    df = pd.DataFrame(data)
+# --- LOGIN ---
+if "logged_in" not in st.session_state:
+    st.session_state["logged_in"] = False
 
-# Process Data
-if df is not None and not df.empty:
-    st.success("✅ Data loaded successfully!")
+if not st.session_state["logged_in"]:
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    if st.button("Login"):
+        if username == USERNAME and password == PASSWORD:
+            st.session_state["logged_in"] = True
+            st.success("✅ Login successful")
+        else:
+            st.error("❌ Invalid credentials")
+    st.stop()  # stop app until login
 
-    # Remove Failed for duration & price
-    df_filtered = df[df["Status"] != "failed"]
+# --- FETCH REPORT ---
+if st.button("Get Report"):
+    report_data = defaultdict(lambda: {"calls": 0, "sms": 0})
 
-    report = (
-        df_filtered.groupby("From")
-        .agg(
-            call_count=("From", "count"),
-            total_duration_sec=("Duration", "sum"),
-            total_price=("Price", "sum"),
-        )
-        .reset_index()
+    # Fetch Calls
+    calls = client.calls.list(
+        start_time_after=start_utc,
+        start_time_before=end_utc,
+        limit=500
     )
+    for c in calls:
+        if c.from_:
+            report_data[c.from_]["calls"] += 1
 
-    report["total_duration_hours"] = (report["total_duration_sec"] / 3600).round(2)
-
-    statuses = (
-        df.groupby("From")["Status"]
-        .unique()
-        .apply(lambda x: ", ".join(x))
-        .reset_index()
-        .rename(columns={"Status": "statuses"})
+    # Fetch SMS
+    messages = client.messages.list(
+        date_sent_after=start_utc,
+        date_sent_before=end_utc,
+        limit=500
     )
+    for m in messages:
+        if m.from_:
+            report_data[m.from_]["sms"] += 1
 
-    report = report.merge(statuses, on="From", how="left")
+    # Show Report
+    today = now_ist.strftime("%d-%b-%Y")
+    st.subheader(f"📊 Daily Twilio Report ({today})")
 
-    report = report[["From", "call_count", "total_duration_hours", "total_price", "statuses"]]
-
-    # Name mapping
-    name_map = {
-        "+13613332093": "Warren Kadd",
-        "+12109341811": "Sam Bailey"
-    }
-    report.insert(0, "Name", report["From"].map(name_map).fillna(""))
-
-    report = report.sort_values(by="call_count", ascending=False).reset_index(drop=True)
-
-    st.subheader("📊 Report")
-    st.dataframe(report)
-
-    # Download CSV
-    csv = report.to_csv(index=False).encode("utf-8")
-    st.download_button("⬇️ Download Report (CSV)", csv, "twilio_report.csv", "text/csv")
+    if not report_data:
+        st.info("No calls or SMS found in this time window.")
+    else:
+        for number, stats in report_data.items():
+            st.write(f"{number} → {stats['calls']} Calls, {stats['sms']} SMS")
