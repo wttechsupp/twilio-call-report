@@ -15,11 +15,11 @@ TWILIO_AUTH_TOKEN = st.secrets["TWILIO_AUTH_TOKEN"]
 client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
 
 # Name mapping (add more as needed)
-NAME_MAP = {
-    "+13613332093": "Warren Kadd",
-    "+12109341811": "Swapnil B",
-    "+14693789446": "Roshan Y",
-}
+# NAME_MAP = {
+#     "+13613332093": "Warren Kadd",
+#     "+12109341811": "Swapnil B",
+#     "+14693789446": "Roshan Y",
+# }
 
 # -----------------------
 # TIME RANGE (IST 5PM–5AM)
@@ -89,3 +89,4 @@ if st.button("Get Report"):
         for number, stats in report_data.items():
             name = NAME_MAP.get(number, "Unknown")
             st.write(f"{name:12} {number} → {stats['calls']} Calls, {stats['sms']} SMS")
+
