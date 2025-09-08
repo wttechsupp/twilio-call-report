@@ -158,24 +158,39 @@ if st.button("Get Report"):
     # -----------------------
     # Process calls — count only completed calls, attribute to our Twilio number
     # -----------------------
+    # for c in calls:
+    #     status = (getattr(c, "status", "") or "").lower()
+    #     if status != "completed":
+    #         continue
+
+    #     raw_our_number = our_number_from_call(c)
+    #     num = normalize_number(raw_our_number)
+    #     if not num:
+    #         continue
+
+    #     report_data[num]["calls"] += 1
+
+    #     # accumulate duration (seconds)
+    #     try:
+    #         d = int(getattr(c, "duration", 0) or 0)
+    #     except Exception:
+    #         d = 0
+    #     report_data[num]["duration"] += d
     for c in calls:
-        status = (getattr(c, "status", "") or "").lower()
-        if status != "completed":
-            continue
+    if (getattr(c, "status", "") or "").lower() != "completed":
+        continue
 
-        raw_our_number = our_number_from_call(c)
-        num = normalize_number(raw_our_number)
-        if not num:
-            continue
+    raw_from = getattr(c, "from_", None)
+    num = normalize_number(raw_from)
+    if not num:
+        continue
 
-        report_data[num]["calls"] += 1
-
-        # accumulate duration (seconds)
-        try:
-            d = int(getattr(c, "duration", 0) or 0)
-        except Exception:
-            d = 0
-        report_data[num]["duration"] += d
+    report_data[num]["calls"] += 1
+    try:
+        d = int(getattr(c, "duration", 0) or 0)
+    except Exception:
+        d = 0
+    report_data[num]["duration"] += d
 
     # -----------------------
     # Process messages — attribute to our Twilio number (outbound -> from_, inbound -> to)
@@ -211,3 +226,4 @@ if st.button("Get Report"):
         st.subheader(f"📊 Daily Twilio Report ({end_ist.strftime('%d-%b-%Y')})")
         st.dataframe(rows, hide_index=True)
         st.caption("Note: Grouping is by your Twilio number (‘Number’ column). Edit NAME_MAP to label each line.")
+
