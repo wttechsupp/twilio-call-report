@@ -99,7 +99,8 @@ if st.button("Get Report"):
 
     # Fetch Twilio calls/messages into lists (so we can inspect len and samples)
     try:
-        calls = list(client.calls.list(start_time_after=start_utc, start_time_before=end_utc))
+        # calls = list(client.calls.list(start_time_after=start_utc, start_time_before=end_utc))
+        calls = list(client.calls.list(start_time_gte=start_utc, start_time_lt=end_utc))
         messages = list(client.messages.list(date_sent_after=start_utc, date_sent_before=end_utc))
     except Exception as e:
         st.error(f"Error fetching from Twilio: {e}")
@@ -158,3 +159,4 @@ if st.button("Get Report"):
         # Display table
         st.subheader(f"📊 Daily Twilio Report ({end_ist.strftime('%d-%b-%Y')})")
         st.table(rows)
+
