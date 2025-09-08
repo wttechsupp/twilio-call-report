@@ -61,20 +61,21 @@ if not st.session_state["logged_in"]:
 if st.button("Get Report"):
     report_data = defaultdict(lambda: {"calls": 0, "sms": 0, "duration": 0})
 
-    # --- Fetch Calls (fixed) ---
+    # --- Fetch Calls (safe) ---
     calls = client.calls.list(
         start_time_after=start_utc,
         start_time_before=end_utc,
         status="completed"
     )
     for c in calls:
-        if c.from_:
-            report_data[c.from_]["calls"] += 1
+        number = getattr(c, "from_", None)  # safe access
+        if number:
+            report_data[number]["calls"] += 1
             try:
                 d = int(c.duration) if c.duration else 0
-            except:
+            except Exception:
                 d = 0
-            report_data[c.from_]["duration"] += d
+            report_data[number]["duration"] += d
 
     # --- Fetch SMS (unchanged) ---
     messages = client.messages.list(
@@ -82,8 +83,9 @@ if st.button("Get Report"):
         date_sent_before=end_utc       
     )
     for m in messages:
-        if m.from_:
-            report_data[m.from_]["sms"] += 1
+        number = getattr(m, "from_", None)
+        if number:
+            report_data[number]["sms"] += 1
 
     # Show Report
     today = now_ist.strftime("%d-%b-%Y")
