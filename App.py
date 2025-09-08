@@ -64,20 +64,22 @@ if st.button("Get Report"):
     # Fetch Calls
     calls = client.calls.list(
         start_time_after=start_utc,
-        start_time_before=end_utc        
+        start_time_before=end_utc
     )
     for c in calls:
-        if c.from_:
-            report_data[c.from_]["calls"] += 1
+        from_number = getattr(c, "from_", None)
+        if from_number:
+            report_data[from_number]["calls"] += 1
 
     # Fetch SMS
     messages = client.messages.list(
         date_sent_after=start_utc,
-        date_sent_before=end_utc       
+        date_sent_before=end_utc
     )
     for m in messages:
-        if m.from_:
-            report_data[m.from_]["sms"] += 1
+        from_number = getattr(m, "from_", None)
+        if from_number:
+            report_data[from_number]["sms"] += 1
 
     # Show Report
     today = now_ist.strftime("%d-%b-%Y")
@@ -89,5 +91,3 @@ if st.button("Get Report"):
         for number, stats in report_data.items():
             name = NAME_MAP.get(number, "Unknown")
             st.write(f"{name:12} {number} → {stats['calls']} Calls, {stats['sms']} SMS")
-
-
