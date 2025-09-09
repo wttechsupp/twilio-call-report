@@ -27,9 +27,8 @@ NAME_MAP = {
     "+14693789446": "Roshan Y",
 }
 
-# <<< NEW SECTION >>>
 # Define the minimum number of identical messages to be considered a "campaign"
-MIN_MESSAGES_FOR_CAMPAIGN = 10 
+MIN_MESSAGES_FOR_CAMPAIGN = 10
 
 # -----------------------
 # Helpers
@@ -46,7 +45,6 @@ def normalize_number(val):
     s2 = re.sub(r'\s+', '', s)
     return s2 if s2 else None
 
-# <<< NEW SECTION >>>
 def extract_template(body):
     """
     Identifies a message template for bulk SMS.
@@ -56,13 +54,10 @@ def extract_template(body):
     if not body:
         return None
     
-    # Split the message at the first comma.
     parts = body.split(',', 1)
     
-    # A campaign message typically has a personalized part then a comma.
     if len(parts) > 1:
         template = parts[1].strip()
-        # Ensure the template is of a reasonable length to avoid classifying short replies as templates.
         if len(template) > 30:
             return template
             
@@ -119,7 +114,7 @@ if not st.session_state["logged_in"]:
         if username == USERNAME and password == PASSWORD:
             st.session_state["logged_in"] = True
             st.success("✅ Login successful")
-            st.experimental_rerun()
+            st.rerun()
         else:
             st.error("❌ Invalid credentials")
     st.stop()
@@ -130,7 +125,6 @@ st.markdown(f"**Window (UTC):** {start_utc.isoformat()} → {end_utc.isoformat()
 show_raw = st.checkbox("Show raw samples (calls/messages) — use for debugging", value=False)
 
 if st.button("Get Report"):
-    # <<< MODIFIED >>> Added 'campaigns' defaultdict to store bulk SMS data.
     report_data = defaultdict(lambda: {
         "calls": 0, 
         "sms": 0, 
@@ -147,11 +141,31 @@ if st.button("Get Report"):
 
     st.write(f"Calls fetched: {len(calls)} — Messages fetched: {len(messages)}")
 
+    # ========== DEBUG SAMPLES (RESTORED) ==========
     if show_raw:
-        st.subheader("Sample calls (first 10)")
-        # ... (raw display code is unchanged)
-        st.subheader("Sample messages (first 10)")
-        # ... (raw display code is unchanged)
+        st.subheader("Sample Messages (first 10)")
+        for m in messages[:10]:
+            st.json({
+                "sid": getattr(m, "sid", None),
+                "from": getattr(m, "from_", None),
+                "to": getattr(m, "to", None),
+                "direction": getattr(m, "direction", None),
+                "status": getattr(m, "status", None),
+                "date_sent": getattr(m, "date_sent", None),
+                "body": getattr(m, "body", None) # Added body for easier debugging
+            })
+        st.subheader("Sample Calls (first 10)")
+        for c in calls[:10]:
+            st.json({
+                "sid": getattr(c, "sid", None),
+                "from": getattr(c, "from_", None),
+                "to": getattr(c, "to", None),
+                "direction": getattr(c, "direction", None),
+                "status": getattr(c, "status", None),
+                "start_time": getattr(c, "start_time", None),
+                "duration": getattr(c, "duration", None),
+            })
+    # ===============================================
 
     # -----------------------
     # Process calls
@@ -174,7 +188,7 @@ if st.button("Get Report"):
         report_data[num]["duration"] += d
 
     # -----------------------
-    # Process messages — <<< MODIFIED >>>
+    # Process messages
     # -----------------------
     for m in messages:
         raw_our_number = our_number_from_message(m)
@@ -182,10 +196,8 @@ if st.button("Get Report"):
         if not num:
             continue
         
-        # Always increment the total SMS count
         report_data[num]["sms"] += 1
         
-        # Check for bulk campaigns only on outbound messages
         direction = (getattr(m, "direction", "") or "").lower()
         if 'outbound' in direction:
             body = getattr(m, 'body', None)
@@ -217,19 +229,15 @@ if st.button("Get Report"):
         st.dataframe(rows, hide_index=True)
         st.caption("Note: Grouping is by your Twilio number (‘Number’ column). Edit NAME_MAP to label each line.")
 
-        # <<< NEW SECTION >>>
         # Display the detected bulk SMS campaigns
-        # ----------------------------------------
         st.divider()
         st.subheader("📊 Bulk SMS Campaign Details")
 
         found_any_campaigns = False
-        # Iterate through the sorted rows to maintain the same user order
         for row in rows:
             num = row["Number"]
             user_campaigns = report_data[num]["campaigns"]
             
-            # Filter for campaigns that meet the minimum message count
             filtered_campaigns = {
                 template: count 
                 for template, count in user_campaigns.items() 
@@ -240,11 +248,9 @@ if st.button("Get Report"):
                 found_any_campaigns = True
                 st.markdown(f"**Campaigns for {row['Name']} ({row['Number']})**")
                 
-                # Sort campaigns by count (most frequent first)
                 sorted_campaigns = sorted(filtered_campaigns.items(), key=lambda item: item[1], reverse=True)
 
                 for template, count in sorted_campaigns:
-                    # Use an expander to keep the UI clean
                     with st.expander(f"**{count} Messages Sent:** `{template[:80].strip()}...`"):
                         st.text_area("Full Template", template, height=150, disabled=True)
 
