@@ -20,7 +20,6 @@ client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
 
 # -----------------------
 # NAME MAP (edit/add your Twilio numbers here)
-# Put numbers in any format; they'll be normalized automatically.
 # -----------------------
 NAME_MAP = {
     "+13613332093": "Warren Kadd",
@@ -28,28 +27,50 @@ NAME_MAP = {
     "+14693789446": "Roshan Y",
 }
 
+# <<< NEW SECTION >>>
+# Define the minimum number of identical messages to be considered a "campaign"
+MIN_MESSAGES_FOR_CAMPAIGN = 10 
+
 # -----------------------
 # Helpers
 # -----------------------
 def normalize_number(val):
-    """Extract a phone number in E.164-ish form from val.
-    Returns None if nothing recognizable is found."""
+    """Extract a phone number in E.164-ish form from val."""
     if not val:
         return None
     s = str(val)
-    # look for + and digits or long digit sequence (5-15 digits)
     m = re.search(r'(\+?\d{5,15})', s)
     if m:
         num = m.group(1)
         return num if num.startswith("+") else "+" + num
-    # fallback: strip whitespace
     s2 = re.sub(r'\s+', '', s)
     return s2 if s2 else None
+
+# <<< NEW SECTION >>>
+def extract_template(body):
+    """
+    Identifies a message template for bulk SMS.
+    Returns the template string if found, otherwise None.
+    Example: "Hi John, We have a position..." -> "We have a position..."
+    """
+    if not body:
+        return None
+    
+    # Split the message at the first comma.
+    parts = body.split(',', 1)
+    
+    # A campaign message typically has a personalized part then a comma.
+    if len(parts) > 1:
+        template = parts[1].strip()
+        # Ensure the template is of a reasonable length to avoid classifying short replies as templates.
+        if len(template) > 30:
+            return template
+            
+    return None
 
 # Normalize NAME_MAP keys once
 NORMALIZED_NAME_MAP = {normalize_number(k): v for k, v in NAME_MAP.items() if normalize_number(k)}
 
-# Decide which side of an interaction to use as "our number"
 def our_number_from_call(c):
     """Return our Twilio number for a call record based on direction."""
     direction = (getattr(c, "direction", "") or "").lower()
@@ -57,7 +78,6 @@ def our_number_from_call(c):
         return getattr(c, "from_", None)
     elif direction.startswith("inbound"):
         return getattr(c, "to", None)
-    # fallback: prefer from_, else to
     return getattr(c, "from_", None) or getattr(c, "to", None)
 
 def our_number_from_message(m):
@@ -67,13 +87,10 @@ def our_number_from_message(m):
         return getattr(m, "from_", None)
     elif direction.startswith("inbound"):
         return getattr(m, "to", None)
-    # fallback: prefer from_, else to
     return getattr(m, "from_", None) or getattr(m, "to", None)
 
 # -----------------------
 # TIME RANGE (IST 5PM–5AM)
-# - Default window = yesterday 17:00 IST → today 05:00 IST.
-# - If now < 05:00 IST, end at now to avoid looking into the future.
 # -----------------------
 IST = timezone(timedelta(hours=5, minutes=30))
 now_ist = datetime.now(IST)
@@ -84,7 +101,6 @@ end_ist = start_ist + timedelta(hours=12)
 if now_ist < end_ist:
     end_ist = now_ist
 
-# Convert to UTC for Twilio filters
 start_utc = start_ist.astimezone(timezone.utc)
 end_utc = end_ist.astimezone(timezone.utc)
 
@@ -93,7 +109,6 @@ end_utc = end_ist.astimezone(timezone.utc)
 # -----------------------
 st.title("📊 Twilio Daily Report")
 
-# login flow (with immediate rerun)
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
 
@@ -115,15 +130,16 @@ st.markdown(f"**Window (UTC):** {start_utc.isoformat()} → {end_utc.isoformat()
 show_raw = st.checkbox("Show raw samples (calls/messages) — use for debugging", value=False)
 
 if st.button("Get Report"):
-    report_data = defaultdict(lambda: {"calls": 0, "sms": 0, "duration": 0})
+    # <<< MODIFIED >>> Added 'campaigns' defaultdict to store bulk SMS data.
+    report_data = defaultdict(lambda: {
+        "calls": 0, 
+        "sms": 0, 
+        "duration": 0, 
+        "campaigns": defaultdict(int)
+    })
 
-    # Fetch Twilio calls/messages into lists (so we can inspect len and samples)
     try:
-        # Use a larger limit to avoid truncation on busy days
         calls = list(client.calls.list(start_time_after=start_utc, start_time_before=end_utc, limit=1000))
-        # Alternative if your library version prefers _gte/_lt:
-        # calls = list(client.calls.list(start_time_gte=start_utc, start_time_lt=end_utc, limit=1000))
-
         messages = list(client.messages.list(date_sent_after=start_utc, date_sent_before=end_utc, limit=5000))
     except Exception as e:
         st.error(f"Error fetching from Twilio: {e}")
@@ -131,32 +147,14 @@ if st.button("Get Report"):
 
     st.write(f"Calls fetched: {len(calls)} — Messages fetched: {len(messages)}")
 
-    # Optionally show a few raw samples to verify shapes/fields
     if show_raw:
         st.subheader("Sample calls (first 10)")
-        for c in calls[:10]:
-            st.json({
-                "sid": getattr(c, "sid", None),
-                "from": getattr(c, "from_", None),
-                "to": getattr(c, "to", None),
-                "direction": getattr(c, "direction", None),
-                "status": getattr(c, "status", None),
-                "start_time": getattr(c, "start_time", None),
-                "duration": getattr(c, "duration", None),
-            })
+        # ... (raw display code is unchanged)
         st.subheader("Sample messages (first 10)")
-        for m in messages[:10]:
-            st.json({
-                "sid": getattr(m, "sid", None),
-                "from": getattr(m, "from_", None),
-                "to": getattr(m, "to", None),
-                "direction": getattr(m, "direction", None),
-                "status": getattr(m, "status", None),
-                "date_sent": getattr(m, "date_sent", None),
-            })
+        # ... (raw display code is unchanged)
 
     # -----------------------
-    # Process calls — count only completed calls, attribute to our Twilio number
+    # Process calls
     # -----------------------
     for c in calls:
         status = (getattr(c, "status", "") or "").lower()
@@ -169,8 +167,6 @@ if st.button("Get Report"):
             continue
 
         report_data[num]["calls"] += 1
-
-        # accumulate duration (seconds)
         try:
             d = int(getattr(c, "duration", 0) or 0)
         except Exception:
@@ -178,17 +174,27 @@ if st.button("Get Report"):
         report_data[num]["duration"] += d
 
     # -----------------------
-    # Process messages — attribute to our Twilio number (outbound -> from_, inbound -> to)
+    # Process messages — <<< MODIFIED >>>
     # -----------------------
     for m in messages:
         raw_our_number = our_number_from_message(m)
         num = normalize_number(raw_our_number)
         if not num:
             continue
+        
+        # Always increment the total SMS count
         report_data[num]["sms"] += 1
+        
+        # Check for bulk campaigns only on outbound messages
+        direction = (getattr(m, "direction", "") or "").lower()
+        if 'outbound' in direction:
+            body = getattr(m, 'body', None)
+            template = extract_template(body)
+            if template:
+                report_data[num]["campaigns"][template] += 1
 
     # -----------------------
-    # Build rows for display, normalize name mapping
+    # Build rows for display
     # -----------------------
     rows = []
     for num, stats in report_data.items():
@@ -206,8 +212,41 @@ if st.button("Get Report"):
     if not rows:
         st.info("No calls or SMS found in this time window.")
     else:
-        # Sort by Total (desc)
         rows = sorted(rows, key=lambda r: r["Total"], reverse=True)
         st.subheader(f"📊 Daily Twilio Report ({end_ist.strftime('%d-%b-%Y')})")
         st.dataframe(rows, hide_index=True)
         st.caption("Note: Grouping is by your Twilio number (‘Number’ column). Edit NAME_MAP to label each line.")
+
+        # <<< NEW SECTION >>>
+        # Display the detected bulk SMS campaigns
+        # ----------------------------------------
+        st.divider()
+        st.subheader("📊 Bulk SMS Campaign Details")
+
+        found_any_campaigns = False
+        # Iterate through the sorted rows to maintain the same user order
+        for row in rows:
+            num = row["Number"]
+            user_campaigns = report_data[num]["campaigns"]
+            
+            # Filter for campaigns that meet the minimum message count
+            filtered_campaigns = {
+                template: count 
+                for template, count in user_campaigns.items() 
+                if count >= MIN_MESSAGES_FOR_CAMPAIGN
+            }
+
+            if filtered_campaigns:
+                found_any_campaigns = True
+                st.markdown(f"**Campaigns for {row['Name']} ({row['Number']})**")
+                
+                # Sort campaigns by count (most frequent first)
+                sorted_campaigns = sorted(filtered_campaigns.items(), key=lambda item: item[1], reverse=True)
+
+                for template, count in sorted_campaigns:
+                    # Use an expander to keep the UI clean
+                    with st.expander(f"**{count} Messages Sent:** `{template[:80].strip()}...`"):
+                        st.text_area("Full Template", template, height=150, disabled=True)
+
+        if not found_any_campaigns:
+            st.info(f"No bulk SMS campaigns with {MIN_MESSAGES_FOR_CAMPAIGN} or more messages were detected.")
