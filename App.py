@@ -97,8 +97,7 @@ show_raw = st.checkbox("Show raw samples (calls/messages) — use for debugging"
 if st.button("Get Report"):
     # Separate aggregates
     sms_data = defaultdict(lambda: {"sms": 0})
-    call_data = defaultdict(lambda: {"calls": 0, "duration": 0})
-
+    
     try:
         calls = list(client.calls.list(start_time_after=start_utc, start_time_before=end_utc, limit=1000))
         messages = list(client.messages.list(date_sent_after=start_utc, date_sent_before=end_utc, limit=5000))
@@ -167,54 +166,47 @@ if st.button("Get Report"):
     st.markdown("---")
 
     # ========== CALLS SECTION (BOTTOM) ==========
-# Process calls
-    completed = 0
-    call_data = defaultdict(lambda: {"calls": 0, "duration": 0})
+    st.subheader("📞 Outbound Call Report")
+    
+    outbound_calls_data = defaultdict(lambda: {"calls": 0, "duration": 0})
+    
+    # Loop through all fetched calls
     for c in calls:
-        status = (getattr(c, "status", "") or "").lower()
-        if status != "completed":
+        # Only process completed calls
+        if getattr(c, "status", "").lower() != "completed":
             continue
-        completed += 1
 
-        # --- NEW LOGIC TO HANDLE CALL DIRECTION ---
         direction = getattr(c, "direction", "")
-        number_to_process = None
-
-        # For outbound calls, the agent is the 'from' number
-        if 'outbound' in direction or 'originating' in direction:
-            number_to_process = getattr(c, "from_", None)
-        # For inbound calls, the agent/system is the 'to' number
-        elif 'inbound' in direction or 'terminating' in direction:
-            number_to_process = getattr(c, "to", None)
         
-        key = normalize_number(number_to_process)
-        if not key:
-            continue  # Skip if we couldn't find a valid number
-        # --- END NEW LOGIC ---
+        # We ONLY care about outbound calls for this report
+        if 'outbound' in direction or 'originating' in direction:
+            agent_number = getattr(c, "from_", None)
+            
+            key = normalize_number(agent_number)
+            if not key:
+                continue # Skip if the agent number is not valid
 
-        call_data[key]["calls"] += 1
-        try:
-            d = int(getattr(c, "duration", 0) or 0)
-        except (ValueError, TypeError):
-            d = 0
-        call_data[key]["duration"] += d
+            # Add the call and its duration to our data
+            outbound_calls_data[key]["calls"] += 1
+            try:
+                d = int(getattr(c, "duration", 0) or 0)
+            except (ValueError, TypeError):
+                d = 0
+            outbound_calls_data[key]["duration"] += d
 
-    st.caption(f"Completed calls counted: {completed}")
-
-    # Build rows for display
-    call_rows = []
-    for key, stats in call_data.items():
-        call_rows.append({
-            "Agent Number": key, # Renamed column for clarity
-            "Name": NAME_MAP.get(key, "Unknown"), # Assuming you have a NAME_MAP
-            "Calls": stats["calls"],
-            "Call Minutes": round(stats["duration"] / 60, 1),
+    # Build and display the report table
+    report_rows = []
+    for number, stats in outbound_calls_data.items():
+        report_rows.append({
+            "Agent Number": number,
+            "Name": name_for(number), # Using the name_for helper function
+            "Total Calls": stats["calls"],
+            "Total Minutes": round(stats["duration"] / 60, 1),
         })
 
-    if call_rows:
-        call_rows = sorted(call_rows, key=lambda r: r["Calls"], reverse=True)
-        st.subheader("📞 Call Report")
-        st.dataframe(call_rows, hide_index=True, use_container_width=True)
+    if report_rows:
+        # Sort by the number of calls (most first)
+        report_rows = sorted(report_rows, key=lambda r: r["Total Calls"], reverse=True)
+        st.dataframe(report_rows, hide_index=True, use_container_width=True)
     else:
-        st.info("No completed calls with a recognizable agent number found.")
-
+        st.info("No completed outbound calls were found in this time window.")
