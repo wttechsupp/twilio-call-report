@@ -179,7 +179,7 @@ if st.button("Get Report"):
         direction = getattr(c, "direction", "")
         
         # We ONLY care about outbound calls for this report
-        if 'outbound' in direction or 'originating' in direction:
+        if 'outbound' in direction or 'Trunking Terminating' in direction:
             agent_number = getattr(c, "from_", None)
             
             key = normalize_number(agent_number)
@@ -210,3 +210,4 @@ if st.button("Get Report"):
         st.dataframe(report_rows, hide_index=True, use_container_width=True)
     else:
         st.info("No completed outbound calls were found in this time window.")
+
