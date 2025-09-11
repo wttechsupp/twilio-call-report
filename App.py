@@ -71,17 +71,132 @@ def our_number_from_message(m):
         return getattr(m, "to", None)
     return getattr(m, "from_", None) or getattr(m, "to", None)
 
-# -----------------------
-# TIME RANGE (IST 5PM–5AM)
-# -----------------------
-IST = timezone(timedelta(hours=5, minutes=30))
-now_ist = datetime.now(IST)
-start_ist = (now_ist.replace(hour=17, minute=0, second=0, microsecond=0) - timedelta(days=1))
-end_ist = start_ist + timedelta(hours=12)
-if now_ist < end_ist:
-    end_ist = now_ist
-start_utc = start_ist.astimezone(timezone.utc)
-end_utc = end_ist.astimezone(timezone.utc)
+# ---------------------------------
+# <<< NEW >>> Main Report Function
+# ---------------------------------
+def run_report(start_utc, end_utc):
+    """
+    Fetches Twilio data for a given time range and displays the full report.
+    """
+    start_ist_display = start_utc.astimezone(IST)
+    end_ist_display = end_utc.astimezone(IST)
+
+    st.markdown(f"**Report Window (IST):** {start_ist_display.strftime('%d-%b-%Y %I:%M %p')} → {end_ist_display.strftime('%d-%b-%Y %I:%M %p')}")
+    
+    with st.spinner('Fetching data from Twilio...'):
+        report_data = defaultdict(lambda: {
+            "calls": 0,
+            "sms": 0,
+            "duration": 0,
+            "campaigns": defaultdict(int),
+            "other_sms": []
+        })
+
+        try:
+            # For longer ranges, we need a much higher limit
+            fetch_limit = 20000 if (end_utc - start_utc).days > 2 else 5000
+            
+            calls = list(client.calls.list(start_time_after=start_utc, start_time_before=end_utc, limit=fetch_limit))
+            messages = list(client.messages.list(date_sent_after=start_utc, date_sent_before=end_utc, limit=fetch_limit))
+        except Exception as e:
+            st.error(f"Error fetching from Twilio: {e}")
+            st.stop()
+
+    st.success(f"Fetched {len(calls)} calls and {len(messages)} messages.")
+
+    # Process calls
+    for c in calls:
+        raw_our_number = our_number_from_call(c)
+        num = normalize_number(raw_our_number)
+        if not num or num not in NORMALIZED_NAME_MAP:
+            continue
+        status = (getattr(c, "status", "") or "").lower()
+        if status == "completed":
+            report_data[num]["calls"] += 1
+            try:
+                d = int(getattr(c, "duration", 0) or 0)
+            except Exception:
+                d = 0
+            report_data[num]["duration"] += d
+
+    # Process messages
+    for m in messages:
+        raw_our_number = our_number_from_message(m)
+        num = normalize_number(raw_our_number)
+        if not num or num not in NORMALIZED_NAME_MAP:
+            continue
+        report_data[num]["sms"] += 1
+        direction = (getattr(m, "direction", "") or "").lower()
+        body = getattr(m, 'body', '')
+        is_campaign_sms = False
+        if 'outbound' in direction:
+            template = extract_template(body)
+            if template:
+                report_data[num]["campaigns"][template] += 1
+                is_campaign_sms = True
+        if not is_campaign_sms:
+            contact = getattr(m, 'to') if 'outbound' in direction else getattr(m, 'from_')
+            report_data[num]["other_sms"].append({
+                "direction": "outbound" if 'outbound' in direction else "inbound",
+                "contact": contact,
+                "body": body,
+            })
+
+    # Build and display rows
+    rows = []
+    for num, stats in report_data.items():
+        name = NORMALIZED_NAME_MAP.get(num, "Unknown")
+        total = stats["calls"] + stats["sms"]
+        rows.append({
+            "Name": name, "Number": num, "Calls": stats["calls"],
+            "Call Minutes": round(stats.get("duration", 0) / 60, 1),
+            "SMS": stats["sms"], "Total": total,
+        })
+
+    if not rows:
+        st.info("No activity found for the specified users in this time window.")
+    else:
+        rows = sorted(rows, key=lambda r: r["Total"], reverse=True)
+        st.subheader(f"📊 Summary Report")
+        st.dataframe(rows, hide_index=True)
+        st.caption("Displaying report only for users defined in NAME_MAP.")
+
+        # --- Display Bulk SMS Campaigns ---
+        st.divider()
+        st.subheader("📢 Bulk SMS Campaign Details")
+        found_any_campaigns = False
+        for row in rows:
+            num = row["Number"]
+            user_campaigns = report_data[num]["campaigns"]
+            filtered_campaigns = {k: v for k, v in user_campaigns.items() if v >= MIN_MESSAGES_FOR_CAMPAIGN}
+            if filtered_campaigns:
+                found_any_campaigns = True
+                st.markdown(f"**Campaigns for {row['Name']} ({row['Number']})**")
+                sorted_campaigns = sorted(filtered_campaigns.items(), key=lambda i: i[1], reverse=True)
+                for template, count in sorted_campaigns:
+                    with st.expander(f"**{count} Messages Sent:** `{template[:80].strip()}...`"):
+                        st.text_area("Full Template", template, height=150, disabled=True, key=f"camp_{num}_{count}_{template[:10]}")
+        if not found_any_campaigns:
+            st.info(f"No bulk campaigns with {MIN_MESSAGES_FOR_CAMPAIGN} or more messages were detected.")
+
+        # --- Display Other SMS (non-campaign) ---
+        st.divider()
+        st.subheader("📬 Other SMS (Replies & Individual Messages)")
+        found_other_sms = False
+        for row in rows:
+            num = row["Number"]
+            other_messages = report_data[num]["other_sms"]
+            if other_messages:
+                found_other_sms = True
+                with st.expander(f"**{row['Name']}** has **{len(other_messages)}** other messages"):
+                    for msg in other_messages:
+                        if msg['direction'] == 'inbound':
+                            st.markdown(f"◀️ **From** `{msg['contact']}`: _{msg['body']}_")
+                        else:
+                            st.markdown(f"▶️ **To** `{msg['contact']}`: _{msg['body']}_")
+        if not found_other_sms:
+            st.info("No individual or reply SMS were detected in this period.")
+
 
 # -----------------------
 # STREAMLIT UI
@@ -103,138 +218,36 @@ if not st.session_state["logged_in"]:
             st.error("❌ Invalid credentials")
     st.stop()
 
-st.markdown(f"**Window (IST):** {start_ist.strftime('%d-%b-%Y %I:%M %p')} → {end_ist.strftime('%d-%b-%Y %I:%M %p')}")
-st.markdown(f"**Window (UTC):** {start_utc.isoformat()} → {end_utc.isoformat()}")
-show_raw = st.checkbox("Show raw samples (calls/messages) — use for debugging", value=False)
+# Set up timezone
+IST = timezone(timedelta(hours=5, minutes=30))
+now_ist = datetime.now(IST)
 
-if st.button("Get Report"):
-    # <<< CHANGE >>> Added 'other_sms' list to store non-campaign messages.
-    report_data = defaultdict(lambda: {
-        "calls": 0,
-        "sms": 0,
-        "duration": 0,
-        "campaigns": defaultdict(int),
-        "other_sms": []
-    })
+# ------------------------------------
+# <<< NEW >>> Button Layout
+# ------------------------------------
+st.header("Select a Report Timeframe")
+col1, col2, col3 = st.columns(3)
 
-    try:
-        calls = list(client.calls.list(start_time_after=start_utc, start_time_before=end_utc, limit=1000))
-        messages = list(client.messages.list(date_sent_after=start_utc, date_sent_before=end_utc, limit=5000))
-    except Exception as e:
-        st.error(f"Error fetching from Twilio: {e}")
-        st.stop()
+with col1:
+    if st.button("Yesterday's Report", use_container_width=True):
+        # Yesterday 5 PM to Today 5 AM IST
+        start_ist = (now_ist.replace(hour=17, minute=0, second=0, microsecond=0) - timedelta(days=1))
+        end_ist = start_ist + timedelta(hours=12)
+        run_report(start_ist.astimezone(timezone.utc), end_ist.astimezone(timezone.utc))
 
-    st.write(f"Calls fetched: {len(calls)} — Messages fetched: {len(messages)}")
+with col2:
+    if st.button("Today's Report (Live)", use_container_width=True):
+        # Today 5 PM to current time
+        start_ist = now_ist.replace(hour=17, minute=0, second=0, microsecond=0)
+        # If it's before 5 PM, start time should be yesterday's 5 PM
+        if now_ist.hour < 17:
+            start_ist -= timedelta(days=1)
+        end_ist = now_ist
+        run_report(start_ist.astimezone(timezone.utc), end_ist.astimezone(timezone.utc))
 
-    # Raw sample display logic remains here...
-
-    # -----------------------
-    # Process calls
-    # -----------------------
-    for c in calls:
-        raw_our_number = our_number_from_call(c)
-        num = normalize_number(raw_our_number)
-        # <<< CHANGE >>> Only process numbers that are in our NAME_MAP
-        if not num or num not in NORMALIZED_NAME_MAP:
-            continue
-        
-        status = (getattr(c, "status", "") or "").lower()
-        if status == "completed":
-            report_data[num]["calls"] += 1
-            try:
-                d = int(getattr(c, "duration", 0) or 0)
-            except Exception:
-                d = 0
-            report_data[num]["duration"] += d
-
-    # -----------------------
-    # Process messages
-    # -----------------------
-    for m in messages:
-        raw_our_number = our_number_from_message(m)
-        num = normalize_number(raw_our_number)
-        # <<< CHANGE >>> Only process numbers that are in our NAME_MAP
-        if not num or num not in NORMALIZED_NAME_MAP:
-            continue
-        
-        report_data[num]["sms"] += 1
-        
-        direction = (getattr(m, "direction", "") or "").lower()
-        body = getattr(m, 'body', '')
-        is_campaign_sms = False
-
-        if 'outbound' in direction:
-            template = extract_template(body)
-            if template:
-                report_data[num]["campaigns"][template] += 1
-                is_campaign_sms = True
-        
-        # <<< CHANGE >>> If it's not a campaign SMS, add it to the 'other_sms' list.
-        if not is_campaign_sms:
-            contact = getattr(m, 'to') if 'outbound' in direction else getattr(m, 'from_')
-            report_data[num]["other_sms"].append({
-                "direction": "outbound" if 'outbound' in direction else "inbound",
-                "contact": contact,
-                "body": body,
-            })
-
-    # -----------------------
-    # Build rows for display
-    # -----------------------
-    rows = []
-    # <<< CHANGE >>> The loop now implicitly filters because we only added data for numbers in NAME_MAP
-    for num, stats in report_data.items():
-        name = NORMALIZED_NAME_MAP.get(num, "Unknown")
-        total = stats["calls"] + stats["sms"]
-        rows.append({
-            "Name": name, "Number": num, "Calls": stats["calls"],
-            "Call Minutes": round(stats.get("duration", 0) / 60, 1),
-            "SMS": stats["sms"], "Total": total,
-        })
-
-    if not rows:
-        st.info("No activity found for the specified users in this time window.")
-    else:
-        rows = sorted(rows, key=lambda r: r["Total"], reverse=True)
-        st.subheader(f"📊 Daily Twilio Report ({end_ist.strftime('%d-%b-%Y')})")
-        st.dataframe(rows, hide_index=True)
-        st.caption("Displaying report only for users defined in NAME_MAP.")
-
-        # --- Display Bulk SMS Campaigns ---
-        st.divider()
-        st.subheader("📢 Bulk SMS Campaign Details")
-        found_any_campaigns = False
-        for row in rows:
-            num = row["Number"]
-            user_campaigns = report_data[num]["campaigns"]
-            filtered_campaigns = {k: v for k, v in user_campaigns.items() if v >= MIN_MESSAGES_FOR_CAMPAIGN}
-            if filtered_campaigns:
-                found_any_campaigns = True
-                st.markdown(f"**Campaigns for {row['Name']} ({row['Number']})**")
-                sorted_campaigns = sorted(filtered_campaigns.items(), key=lambda i: i[1], reverse=True)
-                for template, count in sorted_campaigns:
-                    with st.expander(f"**{count} Messages Sent:** `{template[:80].strip()}...`"):
-                        st.text_area("Full Template", template, height=150, disabled=True, key=f"camp_{num}_{count}")
-
-        if not found_any_campaigns:
-            st.info(f"No bulk campaigns with {MIN_MESSAGES_FOR_CAMPAIGN} or more messages were detected.")
-            
-        # <<< NEW SECTION >>>
-        # --- Display Other SMS (non-campaign) ---
-        st.divider()
-        st.subheader("📬 Other SMS (Replies & Individual Messages)")
-        found_other_sms = False
-        for row in rows:
-            num = row["Number"]
-            other_messages = report_data[num]["other_sms"]
-            if other_messages:
-                found_other_sms = True
-                with st.expander(f"**{row['Name']}** has **{len(other_messages)}** other messages"):
-                    for msg in other_messages:
-                        if msg['direction'] == 'inbound':
-                            st.markdown(f"◀️ **From** `{msg['contact']}`: _{msg['body']}_")
-                        else:
-                            st.markdown(f"▶️ **To** `{msg['contact']}`: _{msg['body']}_")
-        
-        if not found_other_sms:
-            st.info("No individual or reply SMS were detected in this period.")
+with col3:
+    if st.button("Last 30 Days", use_container_width=True):
+        # Last 30 days from the current time
+        end_ist = now_ist
+        start_ist = end_ist - timedelta(days=30)
+        run_report(start_ist.astimezone(timezone.utc), end_ist.astimezone(timezone.utc))
