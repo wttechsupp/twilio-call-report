@@ -3,6 +3,7 @@ import streamlit as st
 from twilio.rest import Client
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
+import hashlib
 
 # -----------------------
 # CONFIG (from Streamlit secrets)
@@ -92,7 +93,6 @@ def run_report(start_utc, end_utc, show_raw):
 
     st.success(f"Fetched {len(calls)} calls and {len(messages)} messages.")
 
-    # <<< CHANGE >>> Display raw data if the checkbox is ticked
     if show_raw:
         with st.expander("Show Raw Data Samples"):
             st.subheader("Sample Messages (first 10)")
@@ -102,7 +102,7 @@ def run_report(start_utc, end_utc, show_raw):
             for c in calls[:10]:
                 st.json({ "sid": c.sid, "from": c.from_, "to": c.to, "direction": c.direction, "status": c.status, "duration": c.duration })
 
-    # Process calls
+    # Process calls & messages
     for c in calls:
         num = normalize_number(our_number_from_call(c))
         if not num or num not in NORMALIZED_NAME_MAP: continue
@@ -110,7 +110,6 @@ def run_report(start_utc, end_utc, show_raw):
             report_data[num]["calls"] += 1
             report_data[num]["duration"] += int(getattr(c, "duration", 0) or 0)
 
-    # Process messages
     for m in messages:
         num = normalize_number(our_number_from_message(m))
         if not num or num not in NORMALIZED_NAME_MAP: continue
@@ -152,9 +151,12 @@ def run_report(start_utc, end_utc, show_raw):
             user_campaigns = {k: v for k, v in report_data[row['Number']]['campaigns'].items() if v >= MIN_MESSAGES_FOR_CAMPAIGN}
             if user_campaigns:
                 st.markdown(f"**Campaigns for {row['Name']} ({row['Number']})**")
-                for template, count in sorted(user_campaigns.items(), key=lambda i: i[1], reverse=True):
+                # <<< FIX IS HERE >>> Use enumerate to get a unique index 'idx'
+                sorted_campaigns = sorted(user_campaigns.items(), key=lambda i: i[1], reverse=True)
+                for idx, (template, count) in enumerate(sorted_campaigns):
                     with st.expander(f"**{count} Msgs:** `{template[:80].strip()}...`"):
-                        st.text_area("Full Template", template, height=150, disabled=True, key=f"camp_{row['Number']}_{template[:10]}")
+                        # Use the unique index 'idx' in the key
+                        st.text_area("Full Template", template, height=150, disabled=True, key=f"camp_{row['Number']}_{idx}")
 
     st.divider()
     st.subheader("📬 Other SMS (Replies & Individual Messages)")
@@ -185,7 +187,6 @@ if not st.session_state.get("logged_in", False):
             st.error("❌ Invalid credentials")
     st.stop()
 
-# Initialize session state for time range
 if "start_utc" not in st.session_state:
     st.session_state.start_utc = None
 if "end_utc" not in st.session_state:
@@ -198,7 +199,6 @@ st.header("Select a Report Timeframe")
 show_raw = st.checkbox("Show raw data samples for debugging")
 st.markdown("---")
 
-# Button Layout
 col1, col2, col3, col4 = st.columns(4)
 
 if col1.button("Yesterday's Report", use_container_width=True):
@@ -221,6 +221,5 @@ if col4.button("Last 30 Days", use_container_width=True):
     st.session_state.end_utc = now_ist.astimezone(timezone.utc)
     st.session_state.start_utc = (now_ist - timedelta(days=30)).astimezone(timezone.utc)
 
-# Run the report if a time range has been set by a button click
 if st.session_state.start_utc and st.session_state.end_utc:
     run_report(st.session_state.start_utc, st.session_state.end_utc, show_raw)
