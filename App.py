@@ -19,7 +19,7 @@ except Exception as e:
 client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
 
 # -----------------------
-# NAME MAP (edit/add your Twilio numbers here)
+# NAME MAP
 # -----------------------
 NAME_MAP = {
     "+13613332093": "Warren Kadd",
@@ -33,8 +33,7 @@ MIN_MESSAGES_FOR_CAMPAIGN = 10
 # Helpers
 # -----------------------
 def normalize_number(val):
-    if not val:
-        return None
+    if not val: return None
     s = str(val)
     m = re.search(r'(\+?\d{5,15})', s)
     if m:
@@ -44,8 +43,7 @@ def normalize_number(val):
     return s2 if s2 else None
 
 def extract_template(body):
-    if not body:
-        return None
+    if not body: return None
     parts = body.split(',', 1)
     if len(parts) > 1:
         template = parts[1].strip()
@@ -57,24 +55,20 @@ NORMALIZED_NAME_MAP = {normalize_number(k): v for k, v in NAME_MAP.items() if no
 
 def our_number_from_call(c):
     direction = (getattr(c, "direction", "") or "").lower()
-    if direction.startswith("outbound"):
-        return getattr(c, "from_", None)
-    elif direction.startswith("inbound"):
-        return getattr(c, "to", None)
+    if direction.startswith("outbound"): return getattr(c, "from_", None)
+    elif direction.startswith("inbound"): return getattr(c, "to", None)
     return getattr(c, "from_", None) or getattr(c, "to", None)
 
 def our_number_from_message(m):
     direction = (getattr(m, "direction", "") or "").lower()
-    if direction.startswith("outbound"):
-        return getattr(m, "from_", None)
-    elif direction.startswith("inbound"):
-        return getattr(m, "to", None)
+    if direction.startswith("outbound"): return getattr(m, "from_", None)
+    elif direction.startswith("inbound"): return getattr(m, "to", None)
     return getattr(m, "from_", None) or getattr(m, "to", None)
 
 # ---------------------------------
-# <<< NEW >>> Main Report Function
+# Main Report Function
 # ---------------------------------
-def run_report(start_utc, end_utc):
+def run_report(start_utc, end_utc, show_raw):
     """
     Fetches Twilio data for a given time range and displays the full report.
     """
@@ -85,17 +79,11 @@ def run_report(start_utc, end_utc):
     
     with st.spinner('Fetching data from Twilio...'):
         report_data = defaultdict(lambda: {
-            "calls": 0,
-            "sms": 0,
-            "duration": 0,
-            "campaigns": defaultdict(int),
-            "other_sms": []
+            "calls": 0, "sms": 0, "duration": 0,
+            "campaigns": defaultdict(int), "other_sms": []
         })
-
         try:
-            # For longer ranges, we need a much higher limit
             fetch_limit = 20000 if (end_utc - start_utc).days > 2 else 5000
-            
             calls = list(client.calls.list(start_time_after=start_utc, start_time_before=end_utc, limit=fetch_limit))
             messages = list(client.messages.list(date_sent_after=start_utc, date_sent_before=end_utc, limit=fetch_limit))
         except Exception as e:
@@ -104,109 +92,88 @@ def run_report(start_utc, end_utc):
 
     st.success(f"Fetched {len(calls)} calls and {len(messages)} messages.")
 
+    # <<< CHANGE >>> Display raw data if the checkbox is ticked
+    if show_raw:
+        with st.expander("Show Raw Data Samples"):
+            st.subheader("Sample Messages (first 10)")
+            for m in messages[:10]:
+                st.json({ "sid": m.sid, "from": m.from_, "to": m.to, "direction": m.direction, "status": m.status, "body": m.body })
+            st.subheader("Sample Calls (first 10)")
+            for c in calls[:10]:
+                st.json({ "sid": c.sid, "from": c.from_, "to": c.to, "direction": c.direction, "status": c.status, "duration": c.duration })
+
     # Process calls
     for c in calls:
-        raw_our_number = our_number_from_call(c)
-        num = normalize_number(raw_our_number)
-        if not num or num not in NORMALIZED_NAME_MAP:
-            continue
-        status = (getattr(c, "status", "") or "").lower()
-        if status == "completed":
+        num = normalize_number(our_number_from_call(c))
+        if not num or num not in NORMALIZED_NAME_MAP: continue
+        if (getattr(c, "status", "") or "").lower() == "completed":
             report_data[num]["calls"] += 1
-            try:
-                d = int(getattr(c, "duration", 0) or 0)
-            except Exception:
-                d = 0
-            report_data[num]["duration"] += d
+            report_data[num]["duration"] += int(getattr(c, "duration", 0) or 0)
 
     # Process messages
     for m in messages:
-        raw_our_number = our_number_from_message(m)
-        num = normalize_number(raw_our_number)
-        if not num or num not in NORMALIZED_NAME_MAP:
-            continue
+        num = normalize_number(our_number_from_message(m))
+        if not num or num not in NORMALIZED_NAME_MAP: continue
         report_data[num]["sms"] += 1
         direction = (getattr(m, "direction", "") or "").lower()
         body = getattr(m, 'body', '')
-        is_campaign_sms = False
-        if 'outbound' in direction:
-            template = extract_template(body)
-            if template:
-                report_data[num]["campaigns"][template] += 1
-                is_campaign_sms = True
-        if not is_campaign_sms:
+        is_campaign = False
+        if 'outbound' in direction and (template := extract_template(body)):
+            report_data[num]["campaigns"][template] += 1
+            is_campaign = True
+        if not is_campaign:
             contact = getattr(m, 'to') if 'outbound' in direction else getattr(m, 'from_')
-            report_data[num]["other_sms"].append({
-                "direction": "outbound" if 'outbound' in direction else "inbound",
-                "contact": contact,
-                "body": body,
-            })
+            report_data[num]["other_sms"].append({ "direction": "outbound" if 'outbound' in direction else "inbound", "contact": contact, "body": body })
 
-    # Build and display rows
+    # Build and display report
     rows = []
     for num, stats in report_data.items():
-        name = NORMALIZED_NAME_MAP.get(num, "Unknown")
-        total = stats["calls"] + stats["sms"]
         rows.append({
-            "Name": name, "Number": num, "Calls": stats["calls"],
+            "Name": NORMALIZED_NAME_MAP.get(num, "Unknown"), "Number": num, "Calls": stats["calls"],
             "Call Minutes": round(stats.get("duration", 0) / 60, 1),
-            "SMS": stats["sms"], "Total": total,
+            "SMS": stats["sms"], "Total": stats["calls"] + stats["sms"],
         })
-
     if not rows:
         st.info("No activity found for the specified users in this time window.")
+        return
+
+    rows = sorted(rows, key=lambda r: r["Total"], reverse=True)
+    st.subheader("📊 Summary Report")
+    st.dataframe(rows, hide_index=True)
+    st.caption("Displaying report only for users defined in NAME_MAP.")
+
+    st.divider()
+    st.subheader("📢 Bulk SMS Campaign Details")
+    found_campaigns = any(report_data[row['Number']]['campaigns'] for row in rows if any(c >= MIN_MESSAGES_FOR_CAMPAIGN for c in report_data[row['Number']]['campaigns'].values()))
+    if not found_campaigns:
+        st.info(f"No bulk campaigns with {MIN_MESSAGES_FOR_CAMPAIGN} or more messages were detected.")
     else:
-        rows = sorted(rows, key=lambda r: r["Total"], reverse=True)
-        st.subheader(f"📊 Summary Report")
-        st.dataframe(rows, hide_index=True)
-        st.caption("Displaying report only for users defined in NAME_MAP.")
-
-        # --- Display Bulk SMS Campaigns ---
-        st.divider()
-        st.subheader("📢 Bulk SMS Campaign Details")
-        found_any_campaigns = False
         for row in rows:
-            num = row["Number"]
-            user_campaigns = report_data[num]["campaigns"]
-            filtered_campaigns = {k: v for k, v in user_campaigns.items() if v >= MIN_MESSAGES_FOR_CAMPAIGN}
-            if filtered_campaigns:
-                found_any_campaigns = True
+            user_campaigns = {k: v for k, v in report_data[row['Number']]['campaigns'].items() if v >= MIN_MESSAGES_FOR_CAMPAIGN}
+            if user_campaigns:
                 st.markdown(f"**Campaigns for {row['Name']} ({row['Number']})**")
-                sorted_campaigns = sorted(filtered_campaigns.items(), key=lambda i: i[1], reverse=True)
-                for template, count in sorted_campaigns:
-                    with st.expander(f"**{count} Messages Sent:** `{template[:80].strip()}...`"):
-                        st.text_area("Full Template", template, height=150, disabled=True, key=f"camp_{num}_{count}_{template[:10]}")
-        if not found_any_campaigns:
-            st.info(f"No bulk campaigns with {MIN_MESSAGES_FOR_CAMPAIGN} or more messages were detected.")
+                for template, count in sorted(user_campaigns.items(), key=lambda i: i[1], reverse=True):
+                    with st.expander(f"**{count} Msgs:** `{template[:80].strip()}...`"):
+                        st.text_area("Full Template", template, height=150, disabled=True, key=f"camp_{row['Number']}_{template[:10]}")
 
-        # --- Display Other SMS (non-campaign) ---
-        st.divider()
-        st.subheader("📬 Other SMS (Replies & Individual Messages)")
-        found_other_sms = False
+    st.divider()
+    st.subheader("📬 Other SMS (Replies & Individual Messages)")
+    found_other = any(report_data[row['Number']]['other_sms'] for row in rows)
+    if not found_other:
+        st.info("No individual or reply SMS were detected.")
+    else:
         for row in rows:
-            num = row["Number"]
-            other_messages = report_data[num]["other_sms"]
-            if other_messages:
-                found_other_sms = True
-                with st.expander(f"**{row['Name']}** has **{len(other_messages)}** other messages"):
-                    for msg in other_messages:
-                        if msg['direction'] == 'inbound':
-                            st.markdown(f"◀️ **From** `{msg['contact']}`: _{msg['body']}_")
-                        else:
-                            st.markdown(f"▶️ **To** `{msg['contact']}`: _{msg['body']}_")
-        if not found_other_sms:
-            st.info("No individual or reply SMS were detected in this period.")
-
+            if messages := report_data[row['Number']]['other_sms']:
+                with st.expander(f"**{row['Name']}** has **{len(messages)}** other messages"):
+                    for msg in messages:
+                        st.markdown(f"{'▶️ **To**' if msg['direction'] == 'outbound' else '◀️ **From**'} `{msg['contact']}`: _{msg['body']}_")
 
 # -----------------------
 # STREAMLIT UI
 # -----------------------
-st.title("📊 Twilio Daily Report")
+st.title("📊 Twilio Activity Report")
 
-if "logged_in" not in st.session_state:
-    st.session_state["logged_in"] = False
-
-if not st.session_state["logged_in"]:
+if not st.session_state.get("logged_in", False):
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
     if st.button("Login"):
@@ -218,36 +185,42 @@ if not st.session_state["logged_in"]:
             st.error("❌ Invalid credentials")
     st.stop()
 
-# Set up timezone
+# Initialize session state for time range
+if "start_utc" not in st.session_state:
+    st.session_state.start_utc = None
+if "end_utc" not in st.session_state:
+    st.session_state.end_utc = None
+
 IST = timezone(timedelta(hours=5, minutes=30))
 now_ist = datetime.now(IST)
 
-# ------------------------------------
-# <<< NEW >>> Button Layout
-# ------------------------------------
 st.header("Select a Report Timeframe")
-col1, col2, col3 = st.columns(3)
+show_raw = st.checkbox("Show raw data samples for debugging")
+st.markdown("---")
 
-with col1:
-    if st.button("Yesterday's Report", use_container_width=True):
-        # Yesterday 5 PM to Today 5 AM IST
-        start_ist = (now_ist.replace(hour=17, minute=0, second=0, microsecond=0) - timedelta(days=1))
-        end_ist = start_ist + timedelta(hours=12)
-        run_report(start_ist.astimezone(timezone.utc), end_ist.astimezone(timezone.utc))
+# Button Layout
+col1, col2, col3, col4 = st.columns(4)
 
-with col2:
-    if st.button("Today's Report (Live)", use_container_width=True):
-        # Today 5 PM to current time
-        start_ist = now_ist.replace(hour=17, minute=0, second=0, microsecond=0)
-        # If it's before 5 PM, start time should be yesterday's 5 PM
-        if now_ist.hour < 17:
-            start_ist -= timedelta(days=1)
-        end_ist = now_ist
-        run_report(start_ist.astimezone(timezone.utc), end_ist.astimezone(timezone.utc))
+if col1.button("Yesterday's Report", use_container_width=True):
+    start_ist = (now_ist.replace(hour=17, minute=0, second=0, microsecond=0) - timedelta(days=1))
+    st.session_state.start_utc = start_ist.astimezone(timezone.utc)
+    st.session_state.end_utc = (start_ist + timedelta(hours=12)).astimezone(timezone.utc)
 
-with col3:
-    if st.button("Last 30 Days", use_container_width=True):
-        # Last 30 days from the current time
-        end_ist = now_ist
-        start_ist = end_ist - timedelta(days=30)
-        run_report(start_ist.astimezone(timezone.utc), end_ist.astimezone(timezone.utc))
+if col2.button("Today's Report (Live)", use_container_width=True):
+    start_ist = now_ist.replace(hour=17, minute=0, second=0, microsecond=0)
+    if now_ist.hour < 17:
+        start_ist -= timedelta(days=1)
+    st.session_state.start_utc = start_ist.astimezone(timezone.utc)
+    st.session_state.end_utc = now_ist.astimezone(timezone.utc)
+
+if col3.button("Last 7 Days", use_container_width=True):
+    st.session_state.end_utc = now_ist.astimezone(timezone.utc)
+    st.session_state.start_utc = (now_ist - timedelta(days=7)).astimezone(timezone.utc)
+
+if col4.button("Last 30 Days", use_container_width=True):
+    st.session_state.end_utc = now_ist.astimezone(timezone.utc)
+    st.session_state.start_utc = (now_ist - timedelta(days=30)).astimezone(timezone.utc)
+
+# Run the report if a time range has been set by a button click
+if st.session_state.start_utc and st.session_state.end_utc:
+    run_report(st.session_state.start_utc, st.session_state.end_utc, show_raw)
