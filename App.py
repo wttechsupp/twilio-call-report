@@ -3,7 +3,6 @@ import streamlit as st
 from twilio.rest import Client
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
-import hashlib
 
 # -----------------------
 # CONFIG (from Streamlit secrets)
@@ -57,12 +56,6 @@ def extract_template(body):
 
 NORMALIZED_NAME_MAP = {normalize_number(k): v for k, v in NAME_MAP.items() if normalize_number(k)}
 
-def our_number_from_call(c):
-    direction = (getattr(c, "direction", "") or "").lower()
-    if direction.startswith("outbound"): return getattr(c, "from_", None)
-    elif direction.startswith("inbound"): return getattr(c, "to", None)
-    return getattr(c, "from_", None) or getattr(c, "to", None)
-
 def our_number_from_message(m):
     direction = (getattr(m, "direction", "") or "").lower()
     if direction.startswith("outbound"): return getattr(m, "from_", None)
@@ -74,7 +67,7 @@ def our_number_from_message(m):
 # ---------------------------------
 def run_report(start_utc, end_utc, show_raw):
     """
-    Fetches Twilio data for a given time range and displays the full report.
+    Fetches Twilio data and displays a report with separate inbound/outbound stats.
     """
     start_ist_display = start_utc.astimezone(IST)
     end_ist_display = end_utc.astimezone(IST)
@@ -83,7 +76,9 @@ def run_report(start_utc, end_utc, show_raw):
 
     with st.spinner('Fetching data from Twilio...'):
         report_data = defaultdict(lambda: {
-            "calls": 0, "sms": 0, "duration": 0,
+            "inbound_calls": 0, "inbound_duration": 0,
+            "outbound_calls": 0, "outbound_duration": 0,
+            "sms": 0,
             "campaigns": defaultdict(int), "other_sms": []
         })
         try:
@@ -100,38 +95,33 @@ def run_report(start_utc, end_utc, show_raw):
         with st.expander("Show Raw Data Samples"):
             st.subheader("Sample Messages (first 10)")
             for m in messages[:10]:
-                st.json({
-                    "sid": getattr(m, 'sid', None),
-                    "from": getattr(m, 'from_', None),
-                    "to": getattr(m, 'to', None),
-                    "direction": getattr(m, 'direction', None),
-                    "status": getattr(m, 'status', None),
-                    "body": getattr(m, 'body', None)
-                })
-
+                st.json({"sid": getattr(m, 'sid', None), "from": getattr(m, 'from_', None), "to": getattr(m, 'to', None), "direction": getattr(m, 'direction', None), "status": getattr(m, 'status', None), "body": getattr(m, 'body', None)})
             st.subheader("Sample Calls (first 10)")
             for c in calls[:10]:
-                st.json({
-                    "sid": getattr(c, 'sid', None),
-                    "from": getattr(c, 'from_', None),
-                    "to": getattr(c, 'to', None),
-                    "direction": getattr(c, 'direction', None),
-                    "status": getattr(c, 'status', None),
-                    "duration": getattr(c, 'duration', None),
-                    "parent_call_sid": getattr(c, 'parent_call_sid', None)
-                })
+                st.json({"sid": getattr(c, 'sid', None), "from": getattr(c, 'from_', None), "to": getattr(c, 'to', None), "direction": getattr(c, 'direction', None), "status": getattr(c, 'status', None), "duration": getattr(c, 'duration', None), "parent_call_sid": getattr(c, 'parent_call_sid', None)})
 
-    # Process calls & messages
+    # --- LOGIC CHANGE START ---
+    # Process calls using the new, more reliable From/To logic
     for c in calls:
         if getattr(c, 'parent_call_sid', None) is not None:
             continue
-        
-        num = normalize_number(our_number_from_call(c))
-        if not num or num not in NORMALIZED_NAME_MAP: continue
-        
-        if (getattr(c, "status", "") or "").lower() == "completed":
-            report_data[num]["calls"] += 1
-            report_data[num]["duration"] += int(getattr(c, "duration", 0) or 0)
+
+        if (getattr(c, "status", "") or "").lower() != "completed":
+            continue
+
+        duration = int(getattr(c, "duration", 0) or 0)
+        from_num = normalize_number(getattr(c, 'from_', None))
+        to_num = normalize_number(getattr(c, 'to', None))
+
+        # Check for Outbound Call: If the 'from' number is one of ours.
+        if from_num in NORMALIZED_NAME_MAP:
+            report_data[from_num]["outbound_calls"] += 1
+            report_data[from_num]["outbound_duration"] += duration
+        # Check for Inbound Call: If the 'to' number is one of ours.
+        elif to_num in NORMALIZED_NAME_MAP:
+            report_data[to_num]["inbound_calls"] += 1
+            report_data[to_num]["inbound_duration"] += duration
+    # --- LOGIC CHANGE END ---
 
     for m in messages:
         num = normalize_number(our_number_from_message(m))
@@ -151,15 +141,20 @@ def run_report(start_utc, end_utc, show_raw):
     rows = []
     for num, stats in report_data.items():
         rows.append({
-            "Name": NORMALIZED_NAME_MAP.get(num, "Unknown"), "Number": num, "Calls": stats["calls"],
-            "Call Minutes": round(stats.get("duration", 0) / 60, 1),
-            "SMS": stats["sms"], "Total": stats["calls"] + stats["sms"],
+            "Name": NORMALIZED_NAME_MAP.get(num, "Unknown"),
+            "Number": num,
+            "Inbound Calls": stats["inbound_calls"],
+            "Inbound Mins": round(stats["inbound_duration"] / 60, 1),
+            "Outbound Calls": stats["outbound_calls"],
+            "Outbound Mins": round(stats["outbound_duration"] / 60, 1),
+            "SMS": stats["sms"],
+            "Total Activity": stats["inbound_calls"] + stats["outbound_calls"] + stats["sms"],
         })
     if not rows:
         st.info("No activity found for the specified users in this time window.")
         return
 
-    rows = sorted(rows, key=lambda r: r["Total"], reverse=True)
+    rows = sorted(rows, key=lambda r: r["Total Activity"], reverse=True)
     st.subheader("📊 Summary Report")
     st.dataframe(rows, hide_index=True)
     st.caption("Displaying report only for users defined in NAME_MAP.")
@@ -178,7 +173,6 @@ def run_report(start_utc, end_utc, show_raw):
                 for idx, (template, count) in enumerate(sorted_campaigns):
                     with st.expander(f"**{count} Msgs:** `{template[:80].strip()}...`"):
                         st.text_area("Full Template", template, height=150, disabled=True, key=f"camp_{row['Number']}_{idx}")
-
     st.divider()
     st.subheader("📬 Other SMS (Replies & Individual Messages)")
     found_other = any(report_data[row['Number']]['other_sms'] for row in rows)
