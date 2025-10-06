@@ -103,12 +103,21 @@ def run_report(start_utc, end_utc, show_raw):
                 st.json({ "sid": m.sid, "from": m.from_, "to": m.to, "direction": m.direction, "status": m.status, "body": m.body })
             st.subheader("Sample Calls (first 10)")
             for c in calls[:10]:
-                st.json({ "sid": c.sid, "from": c.from_, "to": c.to, "direction": c.direction, "status": c.status, "duration": c.duration })
+                st.json({ "sid": c.sid, "from": c.from_, "to": c.to, "direction": c.direction, "status": c.status, "duration": c.duration, "parent_call_sid": c.parent_call_sid })
 
     # Process calls & messages
     for c in calls:
+        # ------------------- FIX START -------------------
+        # Only process parent calls (those without a parent_call_sid).
+        # This prevents double-counting calls and duration from child call legs,
+        # which are created for actions like call forwarding or <Dial> TwiML verbs.
+        if getattr(c, 'parent_call_sid', None) is not None:
+            continue
+        # -------------------- FIX END --------------------
+
         num = normalize_number(our_number_from_call(c))
         if not num or num not in NORMALIZED_NAME_MAP: continue
+        
         if (getattr(c, "status", "") or "").lower() == "completed":
             report_data[num]["calls"] += 1
             report_data[num]["duration"] += int(getattr(c, "duration", 0) or 0)
@@ -154,11 +163,9 @@ def run_report(start_utc, end_utc, show_raw):
             user_campaigns = {k: v for k, v in report_data[row['Number']]['campaigns'].items() if v >= MIN_MESSAGES_FOR_CAMPAIGN}
             if user_campaigns:
                 st.markdown(f"**Campaigns for {row['Name']} ({row['Number']})**")
-                # <<< FIX IS HERE >>> Use enumerate to get a unique index 'idx'
                 sorted_campaigns = sorted(user_campaigns.items(), key=lambda i: i[1], reverse=True)
                 for idx, (template, count) in enumerate(sorted_campaigns):
                     with st.expander(f"**{count} Msgs:** `{template[:80].strip()}...`"):
-                        # Use the unique index 'idx' in the key
                         st.text_area("Full Template", template, height=150, disabled=True, key=f"camp_{row['Number']}_{idx}")
 
     st.divider()
@@ -226,4 +233,3 @@ if col4.button("Last 30 Days", use_container_width=True):
 
 if st.session_state.start_utc and st.session_state.end_utc:
     run_report(st.session_state.start_utc, st.session_state.end_utc, show_raw)
-
