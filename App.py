@@ -72,6 +72,9 @@ def our_number_from_message(m):
 # ---------------------------------
 # Main Report Function
 # ---------------------------------
+# ---------------------------------
+# Main Report Function (Corrected)
+# ---------------------------------
 def run_report(start_utc, end_utc, show_raw):
     """
     Fetches Twilio data for a given time range and displays the full report.
@@ -100,15 +103,39 @@ def run_report(start_utc, end_utc, show_raw):
         with st.expander("Show Raw Data Samples"):
             st.subheader("Sample Messages (first 10)")
             for m in messages[:10]:
-                st.json({ "sid": m.sid, "from": m.from_, "to": m.to, "direction": m.direction, "status": m.status, "body": m.body })
+                # Using getattr for messages too, just to be safe.
+                st.json({
+                    "sid": getattr(m, 'sid', None),
+                    "from": getattr(m, 'from_', None),
+                    "to": getattr(m, 'to', None),
+                    "direction": getattr(m, 'direction', None),
+                    "status": getattr(m, 'status', None),
+                    "body": getattr(m, 'body', None)
+                })
+
             st.subheader("Sample Calls (first 10)")
             for c in calls[:10]:
-                st.json({ "sid": c.sid, "from": c.from_, "to": c.to, "direction": c.direction, "status": c.status, "duration": c.duration })
+                # --- FIX IS HERE ---
+                # Use getattr() to safely access attributes that might be missing.
+                st.json({
+                    "sid": getattr(c, 'sid', None),
+                    "from": getattr(c, 'from_', None),
+                    "to": getattr(c, 'to', None),
+                    "direction": getattr(c, 'direction', None),
+                    "status": getattr(c, 'status', None),
+                    "duration": getattr(c, 'duration', None),
+                    "parent_call_sid": getattr(c, 'parent_call_sid', None)
+                })
 
     # Process calls & messages
     for c in calls:
+        # This is the fix from our previous conversation to prevent double-counting.
+        if getattr(c, 'parent_call_sid', None) is not None:
+            continue
+            
         num = normalize_number(our_number_from_call(c))
         if not num or num not in NORMALIZED_NAME_MAP: continue
+        
         if (getattr(c, "status", "") or "").lower() == "completed":
             report_data[num]["calls"] += 1
             report_data[num]["duration"] += int(getattr(c, "duration", 0) or 0)
@@ -127,6 +154,50 @@ def run_report(start_utc, end_utc, show_raw):
             contact = getattr(m, 'to') if 'outbound' in direction else getattr(m, 'from_')
             report_data[num]["other_sms"].append({ "direction": "outbound" if 'outbound' in direction else "inbound", "contact": contact, "body": body })
 
+    # (The rest of your code remains the same)
+    # Build and display report
+    rows = []
+    for num, stats in report_data.items():
+        rows.append({
+            "Name": NORMALIZED_NAME_MAP.get(num, "Unknown"), "Number": num, "Calls": stats["calls"],
+            "Call Minutes": round(stats.get("duration", 0) / 60, 1),
+            "SMS": stats["sms"], "Total": stats["calls"] + stats["sms"],
+        })
+    if not rows:
+        st.info("No activity found for the specified users in this time window.")
+        return
+
+    rows = sorted(rows, key=lambda r: r["Total"], reverse=True)
+    st.subheader("📊 Summary Report")
+    st.dataframe(rows, hide_index=True)
+    st.caption("Displaying report only for users defined in NAME_MAP.")
+
+    st.divider()
+    st.subheader("📢 Bulk SMS Campaign Details")
+    found_campaigns = any(report_data[row['Number']]['campaigns'] for row in rows if any(c >= MIN_MESSAGES_FOR_CAMPAIGN for c in report_data[row['Number']]['campaigns'].values()))
+    if not found_campaigns:
+        st.info(f"No bulk campaigns with {MIN_MESSAGES_FOR_CAMPAIGN} or more messages were detected.")
+    else:
+        for row in rows:
+            user_campaigns = {k: v for k, v in report_data[row['Number']]['campaigns'].items() if v >= MIN_MESSAGES_FOR_CAMPAIGN}
+            if user_campaigns:
+                st.markdown(f"**Campaigns for {row['Name']} ({row['Number']})**")
+                sorted_campaigns = sorted(user_campaigns.items(), key=lambda i: i[1], reverse=True)
+                for idx, (template, count) in enumerate(sorted_campaigns):
+                    with st.expander(f"**{count} Msgs:** `{template[:80].strip()}...`"):
+                        st.text_area("Full Template", template, height=150, disabled=True, key=f"camp_{row['Number']}_{idx}")
+
+    st.divider()
+    st.subheader("📬 Other SMS (Replies & Individual Messages)")
+    found_other = any(report_data[row['Number']]['other_sms'] for row in rows)
+    if not found_other:
+        st.info("No individual or reply SMS were detected.")
+    else:
+        for row in rows:
+            if messages := report_data[row['Number']]['other_sms']:
+                with st.expander(f"**{row['Name']}** has **{len(messages)}** other messages"):
+                    for msg in messages:
+                        st.markdown(f"{'▶️ **To**' if msg['direction'] == 'outbound' else '◀️ **From**'} `{msg['contact']}`: _{msg['body']}_")
     # Build and display report
     rows = []
     for num, stats in report_data.items():
@@ -226,3 +297,4 @@ if col4.button("Last 30 Days", use_container_width=True):
 
 if st.session_state.start_utc and st.session_state.end_utc:
     run_report(st.session_state.start_utc, st.session_state.end_utc, show_raw)
+
