@@ -91,23 +91,21 @@ def get_twilio_spend(start_date: datetime, end_date: datetime) -> tuple[decimal.
 
 def run_billing_report():
     """
-    MODIFIED: Displays buttons to select a period (week, month, year)
-    and shows the corresponding spending metric.
+    MODIFIED: "This Month" button now shows the report for the "Previous Month".
     """
     st.subheader("💰 Amount Spent Summary")
-    st.markdown("Select a period to view the total spend from its start to the current date.")
+    st.markdown("Select a period to view the total spend.")
 
-    # Initialize session state for the billing period
     if 'billing_period' not in st.session_state:
-        st.session_state.billing_period = 'week' # Default view
+        st.session_state.billing_period = 'week'
 
-    # Buttons to select the period
     col1, col2, col3 = st.columns(3)
     if col1.button("This Week", use_container_width=True, type="primary" if st.session_state.billing_period == 'week' else "secondary"):
         st.session_state.billing_period = 'week'
         st.rerun()
 
-    if col2.button("This Month", use_container_width=True, type="primary" if st.session_state.billing_period == 'month' else "secondary"):
+    # --- CHANGE: Button label and logic updated for Previous Month ---
+    if col2.button("Previous Month", use_container_width=True, type="primary" if st.session_state.billing_period == 'month' else "secondary"):
         st.session_state.billing_period = 'month'
         st.rerun()
 
@@ -117,30 +115,36 @@ def run_billing_report():
 
     st.divider()
 
-    # Calculation and display logic
     today_utc = datetime.now(timezone.utc)
     label = ""
     start_date = None
+    end_date = today_utc  # Default end_date
 
     if st.session_state.billing_period == 'week':
         label = "Amount Spent (This Week)"
         start_date = today_utc - timedelta(days=today_utc.weekday())
+        # end_date remains today_utc
+        
     elif st.session_state.billing_period == 'month':
-        label = "Amount Spent (This Month)"
-        start_date = today_utc.replace(day=1)
+        label = "Amount Spent (Previous Month)"
+        # --- CHANGE: Logic to calculate the start and end of the previous month ---
+        first_day_of_current_month = today_utc.replace(day=1)
+        end_date = first_day_of_current_month - timedelta(days=1)
+        start_date = end_date.replace(day=1)
+        
     elif st.session_state.billing_period == 'year':
         label = "Amount Spent (This Year)"
         start_date = today_utc.replace(month=1, day=1)
+        # end_date remains today_utc
 
     if start_date:
         with st.spinner("Fetching usage data..."):
-            total_spend, currency = get_twilio_spend(start_date, today_utc)
+            total_spend, currency = get_twilio_spend(start_date, end_date)
             st.metric(label=label, value=f"{currency} {total_spend:.2f}")
         
         start_display = start_date.astimezone(IST).strftime('%d-%b-%Y')
-        end_display = today_utc.astimezone(IST).strftime('%d-%b-%Y')
+        end_display = end_date.astimezone(IST).strftime('%d-%b-%Y')
         st.caption(f"Showing report from **{start_display}** to **{end_display}**. Data is cached for 10 minutes.")
-
 
 # ---------------------------------
 # Original Activity Report Function (Unchanged)
@@ -171,7 +175,6 @@ def run_report(start_utc, end_utc, show_raw):
 
     st.success(f"Fetched {len(calls)} calls and {len(messages)} messages.")
     
-    # ... (rest of your original run_report function is unchanged) ...
     if show_raw:
         with st.expander("Show Raw Data Samples"):
             st.subheader("Sample Messages (first 10)")
@@ -270,11 +273,9 @@ if not st.session_state.get("logged_in", False):
             st.error("❌ Invalid credentials")
     st.stop()
 
-# --- Initialize session state for view management
 if "view" not in st.session_state:
-    st.session_state.view = "activity" # Default view is the activity report
+    st.session_state.view = "activity"
 
-# --- Main Navigation Buttons ---
 st.header("Select a Report")
 col_nav1, col_nav2 = st.columns(2)
 with col_nav1:
@@ -284,7 +285,7 @@ with col_nav1:
         type="primary" if st.session_state.view == "activity" else "secondary"
     ):
         st.session_state.view = "activity"
-        st.session_state.start_utc = None # Reset dates when switching
+        st.session_state.start_utc = None
         st.session_state.end_utc = None
         st.rerun()
 
@@ -299,9 +300,7 @@ with col_nav2:
 
 st.divider()
 
-# --- View-Specific Logic ---
 if st.session_state.view == "activity":
-    # This is the original UI logic for the activity report
     if "start_utc" not in st.session_state:
         st.session_state.start_utc = None
     if "end_utc" not in st.session_state:
@@ -341,5 +340,4 @@ if st.session_state.view == "activity":
         run_report(st.session_state.start_utc, st.session_state.end_utc, show_raw)
 
 elif st.session_state.view == "billing":
-    # This is the new logic for the billing report
     run_billing_report()
