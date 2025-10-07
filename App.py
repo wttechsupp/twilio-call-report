@@ -3,7 +3,7 @@ import streamlit as st
 from twilio.rest import Client
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
-import decimal # <-- ADDED for accurate currency math
+import decimal
 
 # -----------------------
 # CONFIG (from Streamlit secrets)
@@ -34,7 +34,7 @@ NAME_MAP = {
 MIN_MESSAGES_FOR_CAMPAIGN = 10
 
 # -----------------------
-# Helpers
+# Helpers (Unchanged)
 # -----------------------
 def normalize_number(val):
     if not val: return None
@@ -64,67 +64,97 @@ def our_number_from_message(m):
     return getattr(m, "from_", None) or getattr(m, "to", None)
 
 # ---------------------------------
-# NEW Billing Report Functions
+# Billing Report Functions
 # ---------------------------------
-@st.cache_data(ttl=600) # Cache the result for 10 minutes to reduce API calls
+@st.cache_data(ttl=600)
 def get_twilio_spend(start_date: datetime, end_date: datetime) -> tuple[decimal.Decimal, str]:
     """
     Fetches Twilio usage records and calculates the total spend for a given period.
-    Returns a tuple of (total_cost, currency).
     """
     try:
-        # The API list method expects date objects, not datetime
         records = client.usage.records.list(
             start_date=start_date.date(),
             end_date=end_date.date()
         )
         total_cost = decimal.Decimal(0)
-        currency = "USD" # Default currency
-
+        currency = "USD"
         if not records:
             return total_cost, currency
-
         for record in records:
             if record.price is not None:
                 total_cost += decimal.Decimal(record.price)
-        
-        currency = records[0].price_unit
+        if records:
+            currency = records[0].price_unit
         return total_cost, currency
-
     except Exception as e:
         st.error(f"Could not fetch Twilio usage data: {e}")
         return decimal.Decimal(0), "USD"
 
 def run_billing_report():
     """
-    Calculates date ranges and displays the billing summary metrics.
+    CORRECTED: This version uses explicit UTC date ranges for the exact
+    reports requested to ensure accuracy.
     """
-    st.subheader("💰 Amount Spent Summary")
-    st.markdown("This report shows cumulative spending for the current calendar week, month, and year.")
+    st.subheader("💰 Amount Spent Report")
+    st.markdown("Select a period to view the total spend.")
 
-    # Use UTC for consistency as Twilio API operates in UTC
-    today_utc = datetime.now(timezone.utc)
-
-    # --- This Week ---
-    start_of_week = today_utc - timedelta(days=today_utc.weekday())
-    weekly_spend, currency = get_twilio_spend(start_of_week, today_utc)
-
-    # --- This Month ---
-    start_of_month = today_utc.replace(day=1)
-    monthly_spend, _ = get_twilio_spend(start_of_month, today_utc)
-
-    # --- This Year ---
-    start_of_year = today_utc.replace(month=1, day=1)
-    yearly_spend, _ = get_twilio_spend(start_of_year, today_utc)
+    if 'billing_period' not in st.session_state:
+        st.session_state.billing_period = 'week'
 
     col1, col2, col3 = st.columns(3)
-    col1.metric("Amount Spent (This Week)", f"{currency} {weekly_spend:.2f}")
-    col2.metric("Amount Spent (This Month)", f"{currency} {monthly_spend:.2f}")
-    col3.metric("Amount Spent (This Year)", f"{currency} {yearly_spend:.2f}")
-    st.caption(f"Last updated: {datetime.now(IST).strftime('%Y-%m-%d %I:%M %p')}. Data is cached for 10 minutes.")
+    if col1.button("This Week", use_container_width=True, type="primary" if st.session_state.billing_period == 'week' else "secondary"):
+        st.session_state.billing_period = 'week'
+        st.rerun()
+
+    if col2.button("Previous Month", use_container_width=True, type="primary" if st.session_state.billing_period == 'month' else "secondary"):
+        st.session_state.billing_period = 'month'
+        st.rerun()
+
+    if col3.button("This Year", use_container_width=True, type="primary" if st.session_state.billing_period == 'year' else "secondary"):
+        st.session_state.billing_period = 'year'
+        st.rerun()
+
+    st.divider()
+    
+    # --- Accurate Date Calculation ---
+    # All calculations are performed in UTC to match the Twilio API's requirements.
+    today_utc = datetime.now(timezone.utc)
+    label = ""
+    start_date_utc = None
+    end_date_utc = None
+
+    if st.session_state.billing_period == 'week':
+        label = "Amount Spent (This Week)"
+        # 'weekday()' treats Monday as 0 and Sunday as 6.
+        start_date_utc = today_utc - timedelta(days=today_utc.weekday())
+        end_date_utc = today_utc
+
+    elif st.session_state.billing_period == 'month':
+        label = "Amount Spent (Previous Month)"
+        first_day_of_current_month = today_utc.replace(day=1)
+        end_date_utc = first_day_of_current_month - timedelta(days=1)
+        start_date_utc = end_date_utc.replace(day=1)
+
+    elif st.session_state.billing_period == 'year':
+        label = "Amount Spent (This Year)"
+        start_date_utc = today_utc.replace(month=1, day=1)
+        end_date_utc = today_utc
+
+    if start_date_utc and end_date_utc:
+        with st.spinner("Fetching usage data..."):
+            total_spend, currency = get_twilio_spend(start_date_utc, end_date_utc)
+            st.metric(label=label, value=f"{currency} {total_spend:.2f}")
+
+        start_display = start_date_utc.astimezone(IST).strftime('%d-%b-%Y')
+        end_display = end_date_utc.astimezone(IST).strftime('%d-%b-%Y')
+        st.caption(f"Showing report for the period from **{start_display}** to **{end_display}**.")
+        
+        # Add a note explaining potential differences with the console
+        st.info("💡 **Note:** All calculations are based on the **UTC timezone** to match the Twilio API. This may differ from your Twilio Console dashboard if it is set to a local timezone (like IST).")
+
 
 # ---------------------------------
-# Original Activity Report Function
+# Original Activity Report Function (Unchanged)
 # ---------------------------------
 def run_report(start_utc, end_utc, show_raw):
     """
@@ -151,8 +181,6 @@ def run_report(start_utc, end_utc, show_raw):
             st.stop()
 
     st.success(f"Fetched {len(calls)} calls and {len(messages)} messages.")
-
-    # ... (rest of your original run_report function is unchanged) ...
     if show_raw:
         with st.expander("Show Raw Data Samples"):
             st.subheader("Sample Messages (first 10)")
@@ -162,10 +190,8 @@ def run_report(start_utc, end_utc, show_raw):
             for c in calls[:10]:
                 st.json({"sid": getattr(c, 'sid', None), "from": getattr(c, 'from_', None), "to": getattr(c, 'to', None), "direction": getattr(c, 'direction', None), "status": getattr(c, 'status', None), "duration": getattr(c, 'duration', None), "parent_call_sid": getattr(c, 'parent_call_sid', None)})
     for c in calls:
-        if getattr(c, 'parent_call_sid', None) is not None:
-            continue
-        if (getattr(c, "status", "") or "").lower() != "completed":
-            continue
+        if getattr(c, 'parent_call_sid', None) is not None: continue
+        if (getattr(c, "status", "") or "").lower() != "completed": continue
         duration = int(getattr(c, "duration", 0) or 0)
         from_num = normalize_number(getattr(c, 'from_', None))
         to_num = normalize_number(getattr(c, 'to', None))
@@ -191,14 +217,10 @@ def run_report(start_utc, end_utc, show_raw):
     rows = []
     for num, stats in report_data.items():
         rows.append({
-            "Name": NORMALIZED_NAME_MAP.get(num, "Unknown"),
-            "Number": num,
-            "Inbound Calls": stats["inbound_calls"],
-            "Inbound Mins": round(stats["inbound_duration"] / 60, 1),
-            "Outbound Calls": stats["outbound_calls"],
-            "Outbound Mins": round(stats["outbound_duration"] / 60, 1),
-            "SMS": stats["sms"],
-            "Total Activity": stats["inbound_calls"] + stats["outbound_calls"] + stats["sms"],
+            "Name": NORMALIZED_NAME_MAP.get(num, "Unknown"), "Number": num,
+            "Inbound Calls": stats["inbound_calls"], "Inbound Mins": round(stats["inbound_duration"] / 60, 1),
+            "Outbound Calls": stats["outbound_calls"], "Outbound Mins": round(stats["outbound_duration"] / 60, 1),
+            "SMS": stats["sms"], "Total Activity": stats["inbound_calls"] + stats["outbound_calls"] + stats["sms"],
         })
     if not rows:
         st.info("No activity found for the specified users in this time window.")
@@ -233,8 +255,9 @@ def run_report(start_utc, end_utc, show_raw):
                     for msg in messages:
                         st.markdown(f"{'▶️ **To**' if msg['direction'] == 'outbound' else '◀️ **From**'} `{msg['contact']}`: _{msg['body']}_")
 
+
 # ----------------------------------------------------
-# STREAMLIT UI (REBUILT FOR SEPARATE REPORT VIEWS)
+# STREAMLIT UI (Unchanged)
 # ----------------------------------------------------
 st.title("📊 Twilio Data Center")
 
@@ -250,54 +273,37 @@ if not st.session_state.get("logged_in", False):
             st.error("❌ Invalid credentials")
     st.stop()
 
-# --- Initialize session state for view management
 if "view" not in st.session_state:
-    st.session_state.view = "activity" # Default view is the activity report
+    st.session_state.view = "activity"
 
-# --- Main Navigation Buttons ---
 st.header("Select a Report")
 col_nav1, col_nav2 = st.columns(2)
 with col_nav1:
-    if st.button(
-        "📞 SMS & Call Activity Report",
-        use_container_width=True,
-        type="primary" if st.session_state.view == "activity" else "secondary"
-    ):
+    if st.button("📞 SMS & Call Activity Report", use_container_width=True, type="primary" if st.session_state.view == "activity" else "secondary"):
         st.session_state.view = "activity"
-        st.session_state.start_utc = None # Reset dates when switching
+        st.session_state.start_utc = None
         st.session_state.end_utc = None
         st.rerun()
-
 with col_nav2:
-    if st.button(
-        "💰 Amount Spent Report",
-        use_container_width=True,
-        type="primary" if st.session_state.view == "billing" else "secondary"
-    ):
+    if st.button("💰 Amount Spent Report", use_container_width=True, type="primary" if st.session_state.view == "billing" else "secondary"):
         st.session_state.view = "billing"
         st.rerun()
-
 st.divider()
 
-# --- View-Specific Logic ---
 if st.session_state.view == "activity":
-    # This is the original UI logic for the activity report
     if "start_utc" not in st.session_state:
         st.session_state.start_utc = None
     if "end_utc" not in st.session_state:
         st.session_state.end_utc = None
-
     now_ist = datetime.now(IST)
     st.subheader("Select a Timeframe for Activity Report")
     show_raw = st.checkbox("Show raw data samples for debugging")
-    
     col1, col2, col3, col4 = st.columns(4)
     if col1.button("Yesterday's Report", use_container_width=True):
         start_ist = (now_ist.replace(hour=17, minute=0, second=0, microsecond=0) - timedelta(days=1))
         st.session_state.start_utc = start_ist.astimezone(timezone.utc)
         st.session_state.end_utc = (start_ist + timedelta(hours=12)).astimezone(timezone.utc)
         st.rerun()
-
     if col2.button("Today's Report (Live)", use_container_width=True):
         start_ist = now_ist.replace(hour=17, minute=0, second=0, microsecond=0)
         if now_ist.hour < 17:
@@ -305,21 +311,16 @@ if st.session_state.view == "activity":
         st.session_state.start_utc = start_ist.astimezone(timezone.utc)
         st.session_state.end_utc = now_ist.astimezone(timezone.utc)
         st.rerun()
-
     if col3.button("Last 7 Days", use_container_width=True):
         st.session_state.end_utc = now_ist.astimezone(timezone.utc)
         st.session_state.start_utc = (now_ist - timedelta(days=7)).astimezone(timezone.utc)
         st.rerun()
-
     if col4.button("Last 30 Days", use_container_width=True):
         st.session_state.end_utc = now_ist.astimezone(timezone.utc)
         st.session_state.start_utc = (now_ist - timedelta(days=30)).astimezone(timezone.utc)
         st.rerun()
-
     if st.session_state.start_utc and st.session_state.end_utc:
         st.divider()
         run_report(st.session_state.start_utc, st.session_state.end_utc, show_raw)
-
 elif st.session_state.view == "billing":
-    # This is the new logic for the billing report
     run_billing_report()
