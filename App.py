@@ -101,26 +101,53 @@ def run_report(start_utc, end_utc, show_raw):
                 st.json({"sid": getattr(c, 'sid', None), "from": getattr(c, 'from_', None), "to": getattr(c, 'to', None), "direction": getattr(c, 'direction', None), "status": getattr(c, 'status', None), "duration": getattr(c, 'duration', None), "parent_call_sid": getattr(c, 'parent_call_sid', None)})
 
     # --- LOGIC CHANGE START ---
-    # Process calls using the new, more reliable From/To logic
-    for c in calls:
-        if getattr(c, 'parent_call_sid', None) is not None:
-            continue
+   # FIXED CALL PROCESSING LOGIC
+# Replace the call processing section (lines ~85-105) with this:
 
-        if (getattr(c, "status", "") or "").lower() != "completed":
-            continue
+for c in calls:
+    # Skip child calls (conference calls, etc.)
+    if getattr(c, 'parent_call_sid', None) is not None:
+        continue
 
-        duration = int(getattr(c, "duration", 0) or 0)
-        from_num = normalize_number(getattr(c, 'from_', None))
-        to_num = normalize_number(getattr(c, 'to', None))
+    # Only process completed calls
+    if (getattr(c, "status", "") or "").lower() != "completed":
+        continue
 
-        # Check for Outbound Call: If the 'from' number is one of ours.
+    duration = int(getattr(c, "duration", 0) or 0)
+    from_num = normalize_number(getattr(c, 'from_', None))
+    to_num = normalize_number(getattr(c, 'to', None))
+    direction = (getattr(c, "direction", "") or "").lower()
+
+    # Debug output (optional - remove in production)
+    if show_raw:
+        st.write(f"DEBUG: Call from {from_num} to {to_num}, direction: {direction}, duration: {duration}")
+
+    # Determine which of our numbers was involved and the call direction
+    our_number = None
+    
+    # Use Twilio's direction field for accurate classification
+    if 'outbound' in direction:
+        # For outbound calls, our number is the 'from' number
         if from_num in NORMALIZED_NAME_MAP:
-            report_data[from_num]["outbound_calls"] += 1
-            report_data[from_num]["outbound_duration"] += duration
-        # Check for Inbound Call: If the 'to' number is one of ours.
+            our_number = from_num
+            report_data[our_number]["outbound_calls"] += 1
+            report_data[our_number]["outbound_duration"] += duration
+    elif 'inbound' in direction:
+        # For inbound calls, our number is the 'to' number
+        if to_num in NORMALIZED_NAME_MAP:
+            our_number = to_num
+            report_data[our_number]["inbound_calls"] += 1
+            report_data[our_number]["inbound_duration"] += duration
+    else:
+        # Fallback logic if direction is unclear - use the old method
+        if from_num in NORMALIZED_NAME_MAP:
+            our_number = from_num
+            report_data[our_number]["outbound_calls"] += 1
+            report_data[our_number]["outbound_duration"] += duration
         elif to_num in NORMALIZED_NAME_MAP:
-            report_data[to_num]["inbound_calls"] += 1
-            report_data[to_num]["inbound_duration"] += duration
+            our_number = to_num
+            report_data[our_number]["inbound_calls"] += 1
+            report_data[our_number]["inbound_duration"] += duration
     # --- LOGIC CHANGE END ---
 
     for m in messages:
@@ -238,4 +265,5 @@ if col4.button("Last 30 Days", use_container_width=True):
 
 if st.session_state.start_utc and st.session_state.end_utc:
     run_report(st.session_state.start_utc, st.session_state.end_utc, show_raw)
+
 
