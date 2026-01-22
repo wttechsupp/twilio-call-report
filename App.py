@@ -29,6 +29,7 @@ NAME_MAP = {
     "+12109343993": "Swapnil G",
     "+12103611235": "Bilal K",
     "+12108796990": "Prathemesh D",
+    "+12819407775": "Moin",
 }
 
 MIN_MESSAGES_FOR_CAMPAIGN = 10
@@ -299,4 +300,5 @@ if col4.button("Last 30 Days", use_container_width=True):
 
 if st.session_state.start_utc and st.session_state.end_utc:
     run_report(st.session_state.start_utc, st.session_state.end_utc, show_raw)
+
 
