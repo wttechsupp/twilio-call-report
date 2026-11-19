@@ -30,6 +30,9 @@ NAME_MAP = {
     "+12103611235": "Bilal K",
     "+12108796990": "Prathemesh D",
     "+12819407775": "Moin",
+    "+13613224111": "Piyush Yadav",
+    "+13464845656":"Jay Gupta",
+    "+14698741361":"Anmol Deshpande",
 }
 
 MIN_MESSAGES_FOR_CAMPAIGN = 10
